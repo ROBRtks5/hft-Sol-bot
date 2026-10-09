@@ -1,0 +1,6 @@
+// Auto-generated or fallback Capacitor build configuration
+dependencies {
+    implementation project(':capacitor-community-keep-awake')
+    implementation project(':capgo-capacitor-native-biometric')
+    implementation project(':capacitor-preferences')
+}

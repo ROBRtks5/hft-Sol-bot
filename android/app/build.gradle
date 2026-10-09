@@ -29,9 +29,8 @@ android {
 
     buildTypes {
         release {
-            minifyEnabled true
-            shrinkResources true
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            minifyEnabled false
+            shrinkResources false
             
             // Если секреты подписи предоставлены в GitHub Secrets - подписываем релизным ключом
             if (System.getenv("RELEASE_STORE_PASSWORD") != null) {
@@ -65,4 +64,10 @@ dependencies {
     
     // Capacitor Core
     implementation project(':capacitor-android')
+}
+
+try {
+    apply from: 'capacitor.build.gradle'
+} catch (Exception e) {
+    logger.info("capacitor.build.gradle not found, skipping")
 }
