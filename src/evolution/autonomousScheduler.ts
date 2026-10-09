@@ -133,9 +133,9 @@ export class AutonomousEvolutionScheduler {
     const isWeekend = [0, 6].includes(new Date().getDay());
 
     let buyerInflow = 42 + Math.floor((Math.random() - 0.4) * 20);
-    let blockTip = 0.0008 + (Math.random() - 0.4) * 0.0006;
+    const blockTip = 0.0008 + (Math.random() - 0.4) * 0.0006;
     let liquidity = 32.5 + (Math.random() - 0.5) * 8;
-    let fundingDensity = 24 + Math.floor(Math.random() * 20);
+    const fundingDensity = 24 + Math.floor(Math.random() * 20);
 
     if (isWeekend) {
       buyerInflow = Math.max(12, buyerInflow - 20);
@@ -190,7 +190,7 @@ export class AutonomousEvolutionScheduler {
 
     let actionTakenRu = '';
     let autoPromoted = false;
-    let rollbackTriggered = false;
+    const rollbackTriggered = false;
 
     // 4. Проверка условий продвижения / отклонения
     if (!shadowReport.passed) {
