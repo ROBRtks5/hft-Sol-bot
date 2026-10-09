@@ -45,7 +45,7 @@ jobs:
 
       - name: 📦 Установка зависимостей проекта
         run: |
-          npm ci || npm install
+          npm ci --legacy-peer-deps || npm install --legacy-peer-deps
 
       - name: 🏗 Сборка Web-консоли через Vite
         run: |
