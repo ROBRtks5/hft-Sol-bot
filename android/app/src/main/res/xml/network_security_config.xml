@@ -1,32 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- Базовая конфигурация для всех сетевых подключений приложения -->
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
-            <!-- 1. Системные предустановленные сертификаты Android -->
             <certificates src="system" />
-            
-            <!-- 2. Пользовательские доверенные сертификаты (установленные вручную в настройках телефона) -->
             <certificates src="user" />
-            
-            <!-- 3. Нативная встроенная поддержка сертификатов Национального удостоверяющего центра Минцифры России -->
-            <certificates src="@raw/russian_trusted_root_ca" />
-            <certificates src="@raw/russian_trusted_sub_ca" />
         </trust-anchors>
     </base-config>
-
-    <!-- Дополнительные исключения для локальной разработки / тестов в изолированной сети (если требуется) -->
-    <domain-config cleartextTrafficPermitted="false">
-        <domain includeSubdomains="true">solana.com</domain>
-        <domain includeSubdomains="true">jito.wtf</domain>
-        <domain includeSubdomains="true">dexscreener.com</domain>
-        <domain includeSubdomains="true">pump.fun</domain>
-        <domain includeSubdomains="true">raydium.io</domain>
-        <trust-anchors>
-            <certificates src="system" />
-            <certificates src="user" />
-            <certificates src="@raw/russian_trusted_root_ca" />
-            <certificates src="@raw/russian_trusted_sub_ca" />
-        </trust-anchors>
-    </domain-config>
 </network-security-config>
