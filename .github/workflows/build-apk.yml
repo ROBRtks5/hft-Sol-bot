@@ -106,12 +106,8 @@ jobs:
           cd android
           chmod +x ./gradlew 2>/dev/null || true
           
-          # Пробуем собрать через gradle wrapper или системный gradle 8.2.1
-          if [ -f "./gradlew" ] && [ -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-            ./gradlew assembleRelease assembleDebug --stacktrace || ./gradlew assembleDebug --stacktrace
-          else
-            gradle assembleRelease assembleDebug --stacktrace || gradle assembleDebug --stacktrace
-          fi
+          # Пробуем собрать через установленный gradle 8.2.1 или обертку gradlew
+          gradle assembleRelease assembleDebug --stacktrace || bash ./gradlew assembleRelease assembleDebug --stacktrace || bash ./gradlew assembleDebug --stacktrace
 
       - name: 🛡 Подготовка артефактов и вычисление SHA-256
         run: |

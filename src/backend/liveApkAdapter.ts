@@ -46,6 +46,9 @@ import { defaultRequestInbox, RequestInboxManager } from './requestInbox';
 import { defaultVitalSigns, VitalSignsMonitor } from './vitalSigns';
 import { defaultJournalExporter, JournalExporter } from './journalExporter';
 import { VitalSignsInfo } from '../types/backend';
+import { defaultYellowstoneAdapter, YellowstoneGrpcAdapter } from '../services/yellowstoneAdapter';
+import { defaultGeminiAdvisoryService, GeminiAdvisoryService } from '../services/geminiAdvisoryService';
+import { SecureStorage } from '../secureStorage';
 
 /**
  * LiveApkBackendAdapter: Боевой автономный движок Phone-Host для запуска внутри Android APK.
