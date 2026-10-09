@@ -1,0 +1,86 @@
+version: '3.8'
+
+services:
+  # ============================================================================
+  # 1. Hot Execution Path (Rust Daemon)
+  # ============================================================================
+  alpha-flip-hot:
+    build:
+      context: ../
+      dockerfile: infra/docker/Dockerfile.hot
+    container_name: alpha-flip-hot
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - hot_journal_data:/app/data
+      - ../configs/hot.micro-live.toml:/etc/alpha-flip/config.toml:ro
+      - /etc/alpha-flip/keypair.json:/etc/alpha-flip/keypair.json:ro
+    environment:
+      - RUST_LOG=info,alpha_flip_hot=debug
+      - HELIUS_API_KEY=${HELIUS_API_KEY:-placeholder}
+    ports:
+      - "127.0.0.1:9090:9090" # Prometheus metrics internal only
+    depends_on:
+      - redis
+    networks:
+      - alpha-net
+
+  # ============================================================================
+  # 2. Cold Advisory Path (Python Workers)
+  # ============================================================================
+  alpha-flip-cold:
+    build:
+      context: ../
+      dockerfile: infra/docker/Dockerfile.cold
+    container_name: alpha-flip-cold
+    restart: unless-stopped
+    volumes:
+      - ../configs/cold.micro-live.yaml:/etc/alpha-flip/cold.yaml:ro
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-placeholder}
+    depends_on:
+      - redis
+    networks:
+      - alpha-net
+
+  # ============================================================================
+  # 3. Next.js Operations Dashboard (Read-Only + Authenticated Controls)
+  # ============================================================================
+  alpha-flip-dashboard:
+    build:
+      context: ./
+      dockerfile: Dockerfile
+    container_name: alpha-flip-dashboard
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - HOT_PATH_API_URL=http://alpha-flip-hot:9090
+      - DASHBOARD_AUTH_TOKEN=${DASHBOARD_AUTH_TOKEN:-change_me_in_production}
+      - PORT=3000
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - alpha-flip-hot
+    networks:
+      - alpha-net
+
+  # ============================================================================
+  # 4. Redis In-Memory Bridge
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: alpha-flip-redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks:
+      - alpha-net
+
+volumes:
+  hot_journal_data:
+
+networks:
+  alpha-net:
+    driver: bridge

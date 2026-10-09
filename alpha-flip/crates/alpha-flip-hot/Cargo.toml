@@ -1,0 +1,33 @@
+[package]
+name = "alpha-flip-hot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Hot deterministic execution path for Alpha-Flip v3.2 Solana momentum flip engine"
+
+[lib]
+name = "alpha_flip_hot"
+path = "src/lib.rs"
+
+[[bin]]
+name = "alpha-flip-hot"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+toml.workspace = true
+dotenvy.workspace = true
+solana-sdk.workspace = true
+bs58.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

@@ -1,0 +1,6 @@
+{
+  "name": "Alpha-Flip v3.2 Autonomous Solana Momentum Flip Engine",
+  "description": "High-frequency Solana memecoin momentum flip engine with two-contour Rust hot path and Python cold advisory path.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

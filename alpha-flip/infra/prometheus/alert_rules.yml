@@ -1,0 +1,101 @@
+groups:
+  - name: alpha_flip_critical_alerts
+    rules:
+      # 1. Yellowstone gRPC Disconnected
+      - alert: YellowstoneGrpcDisconnected
+        expr: alpha_flip_grpc_connected == 0
+        for: 5s
+        labels:
+          severity: critical
+          component: data_feed
+        annotations:
+          summary: "Yellowstone gRPC stream disconnected"
+          description: "Hot path has lost real-time account/transaction streaming for > 5 seconds. Trading pipeline is blinded."
+
+      # 2. Slot Lag High
+      - alert: HighSlotLag
+        expr: alpha_flip_slot_lag > 50
+        for: 10s
+        labels:
+          severity: warning
+          component: parser
+        annotations:
+          summary: "Slot lag exceeds 50 slots"
+          description: "Current slot lag is {{ $value }} slots behind cluster tip. Real-time edge diminished."
+
+      # 3. Critical Slot Lag (> 150 slots means stale blockhashes)
+      - alert: CriticalSlotLag
+        expr: alpha_flip_slot_lag > 150
+        for: 5s
+        labels:
+          severity: critical
+          component: parser
+        annotations:
+          summary: "Slot lag exceeds 150 slots"
+          description: "Lag is {{ $value }} slots. Blockhashes are stale; all outbound bundles will fail."
+
+      # 4. Low Jito Landed Rate
+      - alert: JitoLandedRateLow
+        expr: alpha_flip_landed_rate_bps < 4000 and alpha_flip_bundle_submitted_total > 5
+        for: 1m
+        labels:
+          severity: warning
+          component: execution
+        annotations:
+          summary: "Jito bundle landed rate is below 40%"
+          description: "Landed rate is {{ $value }} bps. Tip adjustment or block engine failover required."
+
+      # 5. Position State Drift
+      - alert: PositionStateDriftDetected
+        expr: alpha_flip_reconciliation_drift == 1
+        for: 0s
+        labels:
+          severity: critical
+          component: risk_engine
+        annotations:
+          summary: "CRITICAL: State drift detected between local journal and on-chain balance"
+          description: "Reconciliation drift flagged. Halting new buys immediately."
+
+      # 6. Wallet Balance Below Safety Floor
+      - alert: WalletBalanceLow
+        expr: alpha_flip_wallet_healthy == 0
+        for: 10s
+        labels:
+          severity: critical
+          component: capital
+        annotations:
+          summary: "Wallet SOL balance dropped below safety floor"
+          description: "Bot balance is insufficient to safely cover rents and Jito tips."
+
+      # 7. Daily Loss Limit Hit
+      - alert: DailyLossLimitReached
+        expr: alpha_flip_edge_gate_rejections_total{reason="daily_loss_limit_hit"} > 0
+        for: 0s
+        labels:
+          severity: critical
+          component: risk_limits
+        annotations:
+          summary: "Daily loss limit breached"
+          description: "Economic edge gate is rejecting trades due to max cumulative drawdown."
+
+      # 8. Unresolved Position Recovery
+      - alert: UnresolvedPositionRecovery
+        expr: alpha_flip_unresolved_recovery == 1
+        for: 1m
+        labels:
+          severity: critical
+          component: recovery
+        annotations:
+          summary: "Bot started with unresolved journaled position"
+          description: "Open position cannot be reconciled with on-chain ATA. Manual audit required."
+
+      # 9. Emergency Kill Switch Activated
+      - alert: KillSwitchActive
+        expr: alpha_flip_kill_switch_active == 1
+        for: 0s
+        labels:
+          severity: page
+          component: emergency
+        annotations:
+          summary: "Alpha-Flip emergency KILL SWITCH has been triggered"
+          description: "Trading is paused and emergency positions liquidation is enforced."

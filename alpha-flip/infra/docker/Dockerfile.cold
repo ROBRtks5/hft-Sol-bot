@@ -1,0 +1,35 @@
+# ==============================================================================
+# Alpha-Flip v3.2 Cold Path Containerfile
+# Non-root Python runtime for narrative profiler & Gemini advisory
+# ==============================================================================
+
+FROM python:3.11-slim-bullseye
+
+# Security hardening: avoid running as root
+RUN groupadd -g 10002 coldpath && \
+    useradd -u 10002 -g coldpath -m -d /home/coldpath -s /usr/sbin/nologin coldpath
+
+WORKDIR /app
+
+# Install security certificates & curl for healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install python dependencies
+COPY services/alpha-flip-cold/pyproject.toml services/alpha-flip-cold/requirements.txt* ./
+RUN pip install --no-cache-dir -U pip setuptools wheel && \
+    if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; else pip install --no-cache-dir .; fi
+
+# Copy application source code
+COPY services/alpha-flip-cold/src /app/src
+RUN pip install --no-cache-dir -e .
+
+# Drop privileges
+USER 10002:10002
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+ENTRYPOINT ["python", "-m", "alpha_flip_cold.main"]

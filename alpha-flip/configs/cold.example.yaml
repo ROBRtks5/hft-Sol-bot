@@ -1,0 +1,21 @@
+# Alpha-Flip v3.2 - Cold Intelligence Configuration
+TRADING_MODE: "observe"
+REDIS_URL: "redis://127.0.0.1:6379/0"
+POSTGRES_URL: "postgresql://alpha_user:alpha_local_dev_password@127.0.0.1:5432/alpha_flip_journal"
+
+# Advisory channels
+advisory_channel: "alpha_flip:cold:advisory"
+telemetry_channel: "alpha_flip:hot:telemetry"
+
+gemini:
+  model_name: "gemini-2.5-flash"
+  max_tokens: 1024
+  temperature: 0.2
+  confidence_threshold: 0.70
+  narrative_evaluation_interval_secs: 15
+
+cabal:
+  max_cluster_wallets: 50
+  insider_holding_veto_threshold: 0.35 # >35% insider supply triggers VETO
+  min_liquidity_usd: 25000.0
+  gmgn_rate_limit_rpm: 120

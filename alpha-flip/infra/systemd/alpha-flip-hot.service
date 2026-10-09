@@ -1,0 +1,53 @@
+[Unit]
+Description=Alpha-Flip v3.2 Autonomous Solana HFT Momentum Flip Hot Path
+After=network-online.target redis.target
+Wants=network-online.target
+Documentation=https://github.com/alpha-flip/alpha-flip
+
+[Service]
+Type=simple
+User=alphaflip
+Group=alphaflip
+WorkingDirectory=/opt/alpha-flip
+
+# Environment files and credentials mounted at runtime
+EnvironmentFile=/etc/alpha-flip/hot.env
+ExecStart=/opt/alpha-flip/bin/alpha-flip-hot --config /etc/alpha-flip/config.toml
+
+# Clean restart policy
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=15s
+
+# Security hardening directives
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+CapabilityBoundingSet=
+MemoryDenyWriteExecute=true
+RestrictRealtime=false
+LockPersonality=true
+
+# Read-only root with writable state directory for durable journal
+ReadOnlyPaths=/
+ReadWritePaths=/var/lib/alpha-flip
+
+# Resource limits (prevent runaway thread allocations or memory leaks)
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+MemoryMax=4G
+MemoryHigh=3.5G
+CPUQuota=400%
+
+# Standard output and error logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=alpha-flip-hot
+
+[Install]
+WantedBy=multi-user.target

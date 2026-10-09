@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.alphaflip.solana.bot">
+
+    <!-- СЕТЬ И ВЗАИМОДЕЙСТВИЕ С SOLANA RPC / GRPAC / JITO -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- KEEP-AWAKE СТЕК (RUNTIME AUTONOMY CLAUSE v2) -->
+    <!-- 1. Фоновая служба с Ongoing-уведомлением для защиты процесса от OOM Killer -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- 2. Удержание процессора в бодрствовании при обработке импульсов и открытой позиции -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- 3. Запрос исключения из энергосбережения Doze (вызывается на первом включении автопилота) -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- 4. Авто-восстановление после непредвиденной перезагрузки телефона -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- 5. Биометрия / PIN для подтверждения опасных операций (вывод средств, смена кошелька) -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="Alpha-Flip v3.2"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:usesCleartextTraffic="false">
+
+        <!-- ОСНОВНАЯ АКТИВНОСТЬ ПУЛЬТА УПРАВЛЕНИЯ -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="Alpha-Flip v3.2"
+            android:launchMode="singleTask"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- ПОСТОЯННЫЙ FOREGROUND SERVICE ДЛЯ АВТОНОМНОЙ ТОРГОВЛИ 24/7 -->
+        <service
+            android:name=".AlphaFlipForegroundService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Autonomous high-frequency Solana DEX monitoring and risk supervisor" />
+        </service>
+
+        <!-- РЕСИВЕР ПЕРЕЗАГРУЗКИ ТЕЛЕФОНА (АВТО-ВОССТАНОВЛЕНИЕ ПОСЛЕ REBOOT) -->
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+
+</manifest>

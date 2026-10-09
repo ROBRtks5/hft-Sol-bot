@@ -1,0 +1,63 @@
+# ==============================================================================
+# Alpha-Flip v3.2 - Hot Engine Configuration
+# ==============================================================================
+
+[mode]
+# Modes: observe | shadow | live | recovering | paused | kill
+trading_mode = "observe"
+
+[grpc]
+endpoint = "https://grpc.helius.xyz:443"
+x_token = "YOUR_YELLOWSTONE_AUTH_TOKEN_HERE"
+commitment = "processed"
+connect_timeout_ms = 5000
+
+[redis]
+redis_url = "redis://127.0.0.1:6379/0"
+advisory_channel = "alpha_flip:cold:advisory"
+telemetry_channel = "alpha_flip:hot:telemetry"
+
+[jito]
+block_engine_url = "https://amsterdam.mainnet.block-engine.jito.wtf"
+tip_account = "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5"
+default_tip_lamports = 1000000   # 0.001 SOL
+max_tip_lamports = 10000000      # 0.010 SOL
+
+[risk]
+# STRICT CAPITAL VELOCITY INVARIANT: Never exceed 1 concurrent position
+max_concurrent_positions = 1
+# Absolute hard capital cap per flip in SOL
+max_position_sol = 1.5
+# Slippage tolerance in basis points (150 = 1.5%)
+max_slippage_bps = 150
+# Mandatory stop loss in basis points (350 = -3.5%)
+stop_loss_bps = 350
+# Cabal score threshold above which trades are vetoed
+cabal_risk_veto_threshold = 75
+
+[economics]
+min_liquidity_sol = 10.0
+target_flip_size_sol = 1.0
+max_daily_drawdown_sol = 5.0
+
+[exit]
+# Initial take profit target in basis points (1200 = +12.0%)
+take_profit_bps = 1200
+# Trailing profit pullback trigger (200 = 2.0%)
+trailing_stop_bps = 200
+# Maximum allowable hold time in seconds before mandatory market exit
+max_hold_duration_secs = 180
+# Maximum hold time in logical slots (~180s / 0.4s)
+max_hold_duration_slots = 450
+# Cooldown period between flips in milliseconds
+post_trade_cooldown_ms = 1500
+
+[wallet]
+keypair_path = "/etc/alpha-flip/secrets/hot-wallet.json"
+sweep_address = "YOUR_COLD_VAULT_PUBLIC_KEY_HERE"
+min_operating_balance_sol = 0.25
+
+[observability]
+log_level = "info"
+telemetry_interval_ms = 500
+enable_json_logs = false

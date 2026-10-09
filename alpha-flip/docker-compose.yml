@@ -1,0 +1,60 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: alpha-flip-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: alpha-flip-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: alpha_user
+      POSTGRES_PASSWORD: alpha_local_dev_password
+      POSTGRES_DB: alpha_flip_journal
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alpha_user -d alpha_flip_journal"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  cold-path:
+    build:
+      context: ./services/alpha-flip-cold
+      dockerfile: Dockerfile
+    container_name: alpha-flip-cold
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      TRADING_MODE: "observe"
+      REDIS_URL: "redis://redis:6379/0"
+      POSTGRES_URL: "postgresql://alpha_user:alpha_local_dev_password@postgres:5432/alpha_flip_journal"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      GMGN_API_KEY: "${GMGN_API_KEY:-}"
+      TWITTER_BEARER_TOKEN: "${TWITTER_BEARER_TOKEN:-}"
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+    volumes:
+      - ./configs:/app/configs:ro
+    command: ["--config", "configs/cold.example.yaml"]
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  pg_data:

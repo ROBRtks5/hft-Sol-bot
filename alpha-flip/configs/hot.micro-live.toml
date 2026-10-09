@@ -1,0 +1,62 @@
+# ==============================================================================
+# Alpha-Flip v3.2 - Micro-Live Hot Path Configuration
+# STRICT CAPITAL CONTROL: Micro-size live deployment (0.01 - 0.05 SOL)
+# ==============================================================================
+
+[mode]
+trading_mode = "live"
+
+[grpc]
+endpoint = "https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}"
+x_token = ""
+commitment = "processed"
+connect_timeout_ms = 3000
+reconnect_backoff_ms = 250
+max_reconnect_attempts = 10
+
+[redis]
+redis_url = "redis://127.0.0.1:6379/0"
+advisory_channel = "alpha_flip:cold:advisory"
+telemetry_channel = "alpha_flip:hot:telemetry"
+
+[jito]
+block_engine_url = "https://amsterdam.mainnet.block-engine.jito.wtf"
+tip_account = "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5"
+default_tip_lamports = 1000000    # 0.001 SOL
+max_tip_lamports = 5000000        # 0.005 SOL max tip cap
+bundle_timeout_slots = 3
+
+[risk]
+# STRICT CAPITAL PRESERVATION
+max_concurrent_positions = 1      # STRICT INVARIANT: 1 open position max
+max_position_sol = 0.03           # Micro-live cap: 0.03 SOL per trade (~$4.50)
+max_daily_loss_sol = 0.10         # Circuit breaker: Auto-kill if loss exceeds 0.10 SOL
+max_consecutive_losses = 2        # Auto-pause after 2 consecutive losing trades
+max_slippage_bps = 150            # 1.5% max allowable slippage
+stop_loss_bps = 300               # 3.0% hard stop-loss
+cabal_risk_veto_threshold = 75    # Discard token if cabal score > 75
+max_trades_per_hour = 4           # Micro-live frequency restriction
+max_tip_spend_per_hour_sol = 0.02 # Hard hourly tip spend ceiling
+
+[economics]
+min_liquidity_sol = 20.0          # Only trade bonding curves with >= 20 SOL reserves
+target_flip_size_sol = 0.02
+margin_of_safety_bps = 200        # 2.0% economic buffer over fees
+
+[exit]
+take_profit_bps = 1200            # Ladder Tier 1: +12% (sell 50%)
+take_profit_tier2_bps = 2500      # Ladder Tier 2: +25% (sell remainder)
+trailing_stop_bps = 150           # 1.5% trailing stop from peak
+max_hold_duration_slots = 300     # Time-stop: Exit if not profitable in 300 slots (~120s)
+post_trade_cooldown_ms = 3000     # 3s enforced cooldown between flips
+
+[wallet]
+keypair_path = "/etc/alpha-flip/keypair.json"
+sweep_address = "MockColdVault1111111111111111111111111111"
+min_operating_balance_sol = 0.15  # Minimum reserve floor
+
+[observability]
+log_level = "info,alpha_flip_hot=debug"
+telemetry_interval_ms = 500
+enable_json_logs = true
+metrics_port = 9090

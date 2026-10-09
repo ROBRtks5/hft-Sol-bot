@@ -1,0 +1,54 @@
+# ==============================================================================
+# Alpha-Flip v3.2 Hot Path Containerfile
+# Non-root, minimal distroless-style deployment with security hardening
+# ==============================================================================
+
+# Stage 1: Build binary
+FROM rust:1.80-bullseye AS builder
+
+WORKDIR /build
+
+# Install dependencies (protobuf compiler for Yellowstone gRPC)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    protobuf-compiler \
+    libssl-dev \
+    pkg-config \
+    clang \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+
+# Compile hot path in release mode with LTO enabled
+RUN cargo build --release --bin alpha-flip-hot
+
+# Stage 2: Minimal non-root runtime
+FROM debian:bullseye-slim AS runner
+
+# Install ca-certificates and libssl
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl1.1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create dedicated unprivileged user and group
+RUN groupadd -g 10001 alphaflip && \
+    useradd -u 10001 -g alphaflip -m -d /home/alphaflip -s /usr/sbin/nologin alphaflip
+
+# Create journal state directory with proper ownership
+RUN mkdir -p /var/lib/alpha-flip /etc/alpha-flip && \
+    chown -R alphaflip:alphaflip /var/lib/alpha-flip /etc/alpha-flip
+
+# Copy compiled binary from builder
+COPY --from=builder /build/target/release/alpha-flip-hot /usr/local/bin/alpha-flip-hot
+RUN chmod 0755 /usr/local/bin/alpha-flip-hot
+
+USER 10001:10001
+WORKDIR /var/lib/alpha-flip
+
+# Metrics port
+EXPOSE 9090
+
+# Immutable entrypoint with read-only filesytem recommendation
+ENTRYPOINT ["/usr/local/bin/alpha-flip-hot"]
+CMD ["--config", "/etc/alpha-flip/config.toml"]

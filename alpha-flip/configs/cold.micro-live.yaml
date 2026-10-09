@@ -1,0 +1,51 @@
+# ==============================================================================
+# Alpha-Flip v3.2 - Micro-Live Cold Path Configuration
+# Advisory profiling only. ZERO trading execution authority.
+# ==============================================================================
+
+service:
+  environment: "micro-live"
+  log_level: "INFO"
+  enable_telemetry: true
+
+redis:
+  url: "redis://127.0.0.1:6379/0"
+  key_prefix: "alpha_flip"
+  telemetry_channel: "alpha_flip:hot:telemetry"
+  advisory_channel: "alpha_flip:cold:advisory"
+  ttl_seconds:
+    wallet_profile: 86400
+    token_profile: 7200
+    narrative_signal: 1800
+
+workers:
+  funding_graph:
+    enabled: true
+    interval_seconds: 15
+    max_depth: 3
+    cluster_threshold: 5
+
+  token_flow:
+    enabled: true
+    interval_seconds: 10
+    dev_proxy_risk_threshold: 65
+
+  smart_money:
+    enabled: true
+    interval_seconds: 30
+    min_win_rate: 0.60
+
+  narrative_ingest:
+    enabled: true
+    interval_seconds: 20
+    max_items_per_batch: 25
+
+ai_guardrails:
+  # In micro-live, narrative boost is DISABLED to evaluate pure hot-path edge first
+  enable_gemini_advisory: true
+  allow_narrative_boost_multiplier: false  # Force boost = 1.0 (no sizing inflation)
+  max_boost_multiplier_cap: 1.05           # Hard ceiling if ever toggled
+  spam_score_veto_threshold: 0.80          # Reject narrative if spam >= 0.80
+  gemini_model: "gemini-2.5-flash"
+  timeout_seconds: 5
+  strict_schema_enforcement: true

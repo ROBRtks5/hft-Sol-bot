@@ -1,0 +1,165 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "System Status & Core Health",
+      "type": "row"
+    },
+    {
+      "id": 1,
+      "title": "Yellowstone gRPC Connected",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "targets": [{ "expr": "alpha_flip_grpc_connected", "legendFormat": "gRPC" }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "options": { "0": { "color": "red", "text": "DISCONNECTED" }, "1": { "color": "green", "text": "CONNECTED" } }, "type": "value" }
+          ]
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Slot Lag (Cluster vs Processed)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "targets": [{ "expr": "alpha_flip_slot_lag", "legendFormat": "Lag Slots" }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 20 },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Jito Landed Rate",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "targets": [{ "expr": "alpha_flip_landed_rate_bps / 100", "legendFormat": "Landed %" }],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 100,
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "green", "value": 80 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Active Position & Drift Status",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "targets": [
+        { "expr": "alpha_flip_reconciliation_drift", "legendFormat": "Drift Flag" },
+        { "expr": "alpha_flip_kill_switch_active", "legendFormat": "Kill Switch" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "options": { "0": { "color": "green", "text": "NORMAL" }, "1": { "color": "red", "text": "ALERT / ACTIVE" } }, "type": "value" }
+          ]
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Live & Shadow Net PnL (SOL)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "targets": [
+        { "expr": "alpha_flip_live_pnl_lamports / 1000000000", "legendFormat": "Live Net PnL" },
+        { "expr": "alpha_flip_shadow_pnl_lamports / 1000000000", "legendFormat": "Shadow Net PnL" }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "id": 101,
+      "title": "Latencies, Ingestion & Microstructure",
+      "type": "row"
+    },
+    {
+      "id": 6,
+      "title": "Instruction Decode Latency (μs)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "targets": [
+        { "expr": "alpha_flip_decode_latency_microseconds{quantile=\"0.50\"}", "legendFormat": "p50 μs" },
+        { "expr": "alpha_flip_decode_latency_microseconds{quantile=\"0.95\"}", "legendFormat": "p95 μs" },
+        { "expr": "alpha_flip_decode_latency_microseconds{quantile=\"0.99\"}", "legendFormat": "p99 μs" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Events & State Updates Throughput (events/sec)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        { "expr": "rate(alpha_flip_events_total[10s])", "legendFormat": "Inbound Events/s" },
+        { "expr": "rate(alpha_flip_state_updates_total[10s])", "legendFormat": "State Updates/s" }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "id": 102,
+      "title": "Risk Rejections & Execution Analytics",
+      "type": "row"
+    },
+    {
+      "id": 8,
+      "title": "Economic Edge Rejections by Reason",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "targets": [
+        { "expr": "increase(alpha_flip_edge_gate_rejections_total[1m])", "legendFormat": "{{ reason }}" }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Bundle Submission Outcomes",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+      "targets": [
+        { "expr": "increase(alpha_flip_bundle_landed_total[1m])", "legendFormat": "Landed" },
+        { "expr": "increase(alpha_flip_bundle_failed_total[1m])", "legendFormat": "Failed" },
+        { "expr": "alpha_flip_average_tip_lamports / 1000000000", "legendFormat": "Avg Tip (SOL)" }
+      ]
+    }
+  ],
+  "schemaVersion": 36,
+  "style": "dark",
+  "tags": ["solana", "hft", "alpha-flip"],
+  "time": { "from": "now-30m", "to": "now" },
+  "timepicker": { "refresh_intervals": ["1s", "5s", "10s"] },
+  "timezone": "utc",
+  "title": "Alpha-Flip v3.2 Production HFT Dashboard",
+  "uid": "alpha-flip-v32-prod"
+}

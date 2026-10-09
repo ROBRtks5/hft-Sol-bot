@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alpha-flip-cold"
+version = "3.2.0"
+description = "Cold narrative intelligence and cabal profiling advisory daemon for Alpha-Flip v3.2"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Alpha-Flip Quant Team" }
+]
+license = { text = "MIT" }
+dependencies = [
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.2.0",
+    "pyyaml>=6.0.1",
+    "redis>=5.0.3",
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.4.0",
+]
+
+[project.scripts]
+alpha-flip-cold = "alpha_flip_cold.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"

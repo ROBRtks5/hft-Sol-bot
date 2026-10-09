@@ -1,0 +1,68 @@
+apply plugin: 'com.android.application'
+apply plugin: 'kotlin-android'
+
+android {
+    namespace "com.alphaflip.solana.bot"
+    compileSdkVersion 34
+    
+    defaultConfig {
+        applicationId "com.alphaflip.solana.bot"
+        minSdkVersion 24
+        targetSdkVersion 34
+        versionCode 32
+        versionName "3.2.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        
+        // Включение поддержки безопасных векторных примитивов
+        vectorDrawables.useSupportLibrary = true
+    }
+
+    signingConfigs {
+        release {
+            // Конфигурируется через переменные окружения CI/CD (GitHub Secrets для подписи бинарника)
+            storeFile file(System.getenv("RELEASE_KEYSTORE_PATH") ?: "release-keystore.jks")
+            storePassword System.getenv("RELEASE_STORE_PASSWORD")
+            keyAlias System.getenv("RELEASE_KEY_ALIAS")
+            keyPassword System.getenv("RELEASE_KEY_PASSWORD")
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            
+            // Если секреты подписи предоставлены в GitHub Secrets - подписываем релизным ключом
+            if (System.getenv("RELEASE_STORE_PASSWORD") != null) {
+                signingConfig signingConfigs.release
+            }
+        }
+        debug {
+            applicationIdSuffix ".debug"
+            debuggable true
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.22"
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'androidx.core:core-ktx:1.12.0'
+    implementation 'androidx.biometric:biometric:1.1.0'
+    implementation 'androidx.work:work-runtime-ktx:2.9.0'
+    implementation 'androidx.security:security-crypto:1.1.0-alpha06'
+    
+    // Capacitor Core
+    implementation project(':capacitor-android')
+}
