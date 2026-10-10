@@ -35,6 +35,7 @@ import {
   HardeningAuditReport,
   DailyDigestState,
   HandsOffAuditReport,
+  TargetMetric,
 } from '../types/backend';
 import { EngineBackend } from './engineContract';
 import { SigningAdapter, createSigningAdapter } from '../signing/signingAdapter';
@@ -513,6 +514,10 @@ export class SimulatorBackendAdapter implements EngineBackend {
       earnedTodayPct: this.state.earnedTodayPct,
       pnlHistory: this.state.pnlHistory,
     };
+  }
+
+  public getTopCorridorCandidates(): TargetMetric[] {
+    return [];
   }
 
   public async getDecisions(n: number = 10): Promise<DecisionItem[]> {

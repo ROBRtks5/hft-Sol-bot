@@ -36,6 +36,7 @@ import {
   DailyDigestState,
   HandsOffAuditReport,
   VitalSignsInfo,
+  TargetMetric,
 } from '../types/backend';
 import { SigningAdapter } from '../signing/signingAdapter';
 import { KeepAwakeAdapter } from '../keepAwakeAdapter';
@@ -67,6 +68,7 @@ export interface EngineBackend {
   getHealth(): Promise<HealthIndicators>;
   getLiveAction(): Promise<string>;
   getMoney(): Promise<MoneySummary>;
+  getTopCorridorCandidates?(): TargetMetric[];
   getDecisions(n?: number): Promise<DecisionItem[]>;
   getNeedsYou(): Promise<NeedsYouCard | null>;
   getMarketCandidates(): Promise<MarketCandidate[]>;

@@ -107,12 +107,25 @@ export interface HealthIndicators {
 export interface DecisionItem {
   id: string;
   timeStr: string;
-  kind: 'bought' | 'rejected' | 'sold' | 'candidate';
+  kind: 'bought' | 'rejected' | 'sold' | 'candidate' | 'trade_attempt';
   symbol: string;
   mint?: string;
   actionRu: string;
   reasonRu: string;
   detailsRu?: string;
+  bundleStatus?: 'Pending' | 'Landed' | 'Failed';
+}
+
+export interface TargetMetric {
+  symbol: string;
+  mint: string;
+  curveSol: number;
+  netInflowSol: number;
+  buyersCount: number;
+  readinessScore: number;
+  isCTO: boolean;
+  ctoBadgeRu: string;
+  lastTickAgeSec: number;
 }
 
 export interface PreflightCheckItem {

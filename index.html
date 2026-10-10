@@ -14,8 +14,8 @@
       window.process = window.process || { env: {} };
     </script>
   </head>
-  <body class="bg-[#090d10] text-slate-100">
-    <div id="root"></div>
+  <body class="bg-[#090d10] text-slate-100 h-screen w-screen overflow-hidden">
+    <div id="root" class="h-full w-full overflow-hidden"></div>
     <div id="emergency-error-overlay" style="display:none; position:fixed; inset:0; z-index:999999; background:#0f0507; color:#f87171; padding:20px; font-family:monospace; overflow:auto; box-sizing:border-box;">
       <h2 style="font-size:16px; font-weight:bold; color:#ef4444; margin-bottom:10px; border-bottom:1px solid #7f1d1d; padding-bottom:8px;">
         ⚠️ АВАРИЙНЫЙ СБОЙ ПРИ ЗАПУСКЕ (FATAL BOOT ERROR)

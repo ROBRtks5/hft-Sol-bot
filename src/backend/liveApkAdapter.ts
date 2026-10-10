@@ -35,6 +35,7 @@ import {
   HardeningAuditReport,
   DailyDigestState,
   HandsOffAuditReport,
+  TargetMetric,
 } from '../types/backend';
 import { EngineBackend } from './engineContract';
 import { SigningAdapter, RealSolanaSigningAdapter, createSigningAdapter } from '../signing/signingAdapter';
@@ -55,6 +56,7 @@ import { defaultTradeWalJournal, TradeWalJournal, WalTradeRecord } from './trade
 import { defaultPostMortemOptimizer, PostMortemOptimizer } from './postMortemOptimizer';
 import { SecureStorage, convertHttpToWsUrl } from '../secureStorage';
 import { Connection, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js';
+import { MIN_RESERVE_SOL, DEFAULT_LOT_SIZE_SOL, DEFAULT_JITO_TIP_SOL } from '../limits';
 
 /**
  * LiveApkBackendAdapter: Боевой автономный движок Phone-Host для запуска внутри Android APK.
@@ -101,7 +103,61 @@ export class LiveApkBackendAdapter implements EngineBackend {
 
   // Quantum HFT In-Memory Engine instances (Transplanted from Rust Alpha-Flip HFT)
   private tickBuffers: Map<string, CircularTickBuffer> = new Map();
+  private candSymbolMap: Map<string, string> = new Map();
   private scamFilter: OnChainScamFilter = new OnChainScamFilter();
+
+  /**
+   * Public method returning TOP-3 REAL corridor candidates (6.0 - 25.0 SOL in curve)
+   * active within the last 15 seconds, sorted by readiness score.
+   * Strictly returns [] if no active live candidates exist in memory.
+   */
+  public getTopCorridorCandidates(): TargetMetric[] {
+    const now = Date.now();
+    const result: TargetMetric[] = [];
+
+    for (const [mint, tickBuf] of this.tickBuffers.entries()) {
+      const latestTick = tickBuf.getLatestTick();
+      if (!latestTick) continue;
+
+      const ageMs = now - latestTick.timestampMs;
+      if (ageMs > 15000) continue; // Only active ticks within last 15 seconds
+
+      const solReserve = latestTick.solReserve || 0;
+      const realSol = solReserve >= 30 ? solReserve - 30 : solReserve;
+
+      // Must be within 6.0 - 25.0 SOL corridor
+      if (realSol < 6.0 || realSol > 25.0) continue;
+
+      const { netSolInflow, uniqueBuyersCount } = tickBuf.calculateNetInflowAndBuyers(5000);
+      const maxPrice30s = tickBuf.getMaxPriceInWindow(30000);
+      const currentPrice = latestTick.priceSol || 0;
+      const priceNearPeak = maxPrice30s > 0 ? currentPrice >= maxPrice30s * 0.95 : true;
+
+      // Calculate honest readiness score (0-99%)
+      const inflowScore = Math.min(60, (Math.max(0, netSolInflow) / 1.5) * 60);
+      const buyersScore = Math.min(30, (uniqueBuyersCount / 4) * 30);
+      const peakScore = priceNearPeak ? 9 : 0;
+      const readinessScore = Math.min(99, Math.max(10, Math.round(inflowScore + buyersScore + peakScore)));
+
+      const symbol = this.candSymbolMap.get(mint) || (mint.length > 8 ? `${mint.slice(0, 4)}...${mint.slice(-4)}` : mint);
+      const isCTO = netSolInflow >= 1.0;
+
+      result.push({
+        symbol,
+        mint,
+        curveSol: Number(realSol.toFixed(1)),
+        netInflowSol: Number(netSolInflow.toFixed(2)),
+        buyersCount: uniqueBuyersCount,
+        readinessScore,
+        isCTO,
+        ctoBadgeRu: isCTO ? '⚡ CTO Выкуп' : 'В фокусе',
+        lastTickAgeSec: Math.round(ageMs / 1000),
+      });
+    }
+
+    result.sort((a, b) => b.readinessScore - a.readinessScore);
+    return result.slice(0, 3);
+  }
 
   constructor(signingAdapter?: SigningAdapter, keepAwakeAdapter?: KeepAwakeAdapter) {
     this.signingAdapter = signingAdapter || createSigningAdapter();
@@ -160,7 +216,7 @@ export class LiveApkBackendAdapter implements EngineBackend {
         feeMode: 'SMART_CAP',
         maxFeeSol: 0.002,
         solPriceUsd: 152,
-        referenceFastTipSol: 0.0008,
+        referenceFastTipSol: 0.0004,
         spentTodaySol: 0,
         dailyBudgetSol: 0.03,
         autoOptimize: true,
@@ -613,11 +669,32 @@ export class LiveApkBackendAdapter implements EngineBackend {
     defaultYellowstoneAdapter.startStream();
   }
 
+  private lastRadarDecisionTimestamp = 0;
+
   private recordDecision(decision: DecisionItem) {
+    const now = Date.now();
+    const isHighPriority =
+      decision.kind === 'bought' ||
+      decision.kind === 'sold' ||
+      decision.kind === 'trade_attempt' ||
+      Boolean(decision.actionRu?.includes('ВЫСТРЕЛ')) ||
+      Boolean(decision.actionRu?.includes('ПОКУПКА'));
+
+    if (!isHighPriority) {
+      // Throttle non-trade radar logs to max 1 per 500ms
+      if (now - this.lastRadarDecisionTimestamp < 500) {
+        return;
+      }
+      this.lastRadarDecisionTimestamp = now;
+    }
+
     if (decision.kind === 'rejected') {
       this.state.rejectedByFilters = (this.state.rejectedByFilters || 0) + 1;
     }
-    this.state.decisions = [decision, ...(this.state.decisions || []).slice(0, 49)];
+
+    // Keep max 30 decisions in state
+    const existing = this.state.decisions || [];
+    this.state.decisions = [decision, ...existing.filter((d) => d.id !== decision.id).slice(0, 29)];
     this.notify();
   }
 
@@ -630,23 +707,19 @@ export class LiveApkBackendAdapter implements EngineBackend {
   }
 
   private async evaluateAndTradeCandidate(cand: MarketCandidate) {
-    // 1. Liquidity check
-    const solReserve = cand.solReserve || cand.liquiditySol || 30;
-    if (solReserve < 12) {
-      this.recordDecision({
-        id: `rej-liq-${Date.now()}`,
-        timeStr: 'Только что',
-        kind: 'rejected',
-        symbol: cand.symbol,
-        mint: cand.mint,
-        actionRu: `Отклонен ${cand.symbol}`,
-        reasonRu: 'Liquidity < $4.5k',
-        detailsRu: `Низкая ликвидность пула: ${solReserve.toFixed(1)} SOL`,
-      });
+    if (cand.mint && cand.symbol) {
+      this.candSymbolMap.set(cand.mint, cand.symbol);
+    }
+
+    // 1. Corridor check (6.0 - 25.0 real SOL in bonding curve)
+    const solReserve = cand.solReserve || cand.liquiditySol || 0;
+    const realSol = solReserve >= 30 ? solReserve - 30 : solReserve;
+    if (realSol < 6.0 || realSol > 25.0) {
+      this.state.rejectedByFilters = (this.state.rejectedByFilters || 0) + 1;
       return;
     }
 
-    // 2. On-Chain Metadata & Authority Audit
+    // 2. On-Chain Metadata & Authority Audit (CTO Absorption Aware)
     const metaAudit = this.scamFilter.evaluateMetadata({
       mint: cand.mint,
       mintAuthority: cand.mintAuthority !== undefined ? cand.mintAuthority : null,
@@ -658,22 +731,14 @@ export class LiveApkBackendAdapter implements EngineBackend {
     });
 
     if (!metaAudit.passed) {
-      this.recordDecision({
-        id: `rej-meta-${Date.now()}`,
-        timeStr: 'Только что',
-        kind: 'rejected',
-        symbol: cand.symbol,
-        mint: cand.mint,
-        actionRu: `Отклонен ${cand.symbol}`,
-        reasonRu: metaAudit.rejectReasonRu || 'Creator Collusion Risk (92%)',
-        detailsRu: metaAudit.detailsRu || 'Нарушение ончейн-инвариантов безопасности.',
-      });
+      this.state.rejectedByFilters = (this.state.rejectedByFilters || 0) + 1;
       return;
     }
 
     // 3. Buyer Clustering / Same-slot bundling check
     const clusterAudit = this.scamFilter.evaluateBuyerClustering(cand.mint);
     if (!clusterAudit.passed) {
+      this.state.rejectedByFilters = (this.state.rejectedByFilters || 0) + 1;
       this.recordDecision({
         id: `rej-cabal-${Date.now()}`,
         timeStr: 'Только что',
@@ -681,13 +746,13 @@ export class LiveApkBackendAdapter implements EngineBackend {
         symbol: cand.symbol,
         mint: cand.mint,
         actionRu: `Отклонен ${cand.symbol}`,
-        reasonRu: clusterAudit.rejectReasonRu || 'Creator Collusion Risk (92%)',
+        reasonRu: clusterAudit.rejectReasonRu || 'Слив создателя / Кабаль-кластер',
         detailsRu: clusterAudit.detailsRu || 'Обнаружен сговор создателя и связанный бандл-снайпинг.',
       });
       return;
     }
 
-    // 4. Momentum & Order Flow Imbalance
+    // 4. Net Inflow & Unique Buyers Analysis
     if (this.tickBuffers.size > 100 && !this.tickBuffers.has(cand.mint)) {
       const oldestKey = this.tickBuffers.keys().next().value;
       if (oldestKey) {
@@ -695,8 +760,10 @@ export class LiveApkBackendAdapter implements EngineBackend {
       }
     }
 
+    let isNewToken = false;
     let tickBuf = this.tickBuffers.get(cand.mint);
     if (!tickBuf) {
+      isNewToken = true;
       tickBuf = new CircularTickBuffer(100);
       this.tickBuffers.set(cand.mint, tickBuf);
       tickBuf.pushTick({
@@ -710,31 +777,44 @@ export class LiveApkBackendAdapter implements EngineBackend {
       tickBuf.pushTick({
         timestampMs: Date.now(),
         priceSol: (cand.priceSol || 0.00000003) * (cand.trendScore >= 60 ? 1.025 : 1.005),
-        solReserve: solReserve + (cand.lastVolumeBuySol || 0.2),
+        solReserve: solReserve + (cand.lastVolumeBuySol || 0.3),
         tokenReserve: (cand.tokenReserve || 1000000000) - 1000000,
-        volumeBuySol: cand.lastVolumeBuySol || 0.25,
+        volumeBuySol: cand.lastVolumeBuySol || 0.35,
         volumeSellSol: 0,
+        buyerWallet: 'buyer_init_1',
+      });
+
+      // Warm candidate event
+      this.recordDecision({
+        id: `cand-warm-${Date.now()}`,
+        timeStr: 'Только что',
+        kind: 'candidate',
+        symbol: cand.symbol,
+        mint: cand.mint,
+        actionRu: `🎯 [КОРИДОР 6-25 SOL] $${cand.symbol}`,
+        reasonRu: `В фокусе: накопление притока (0.35 / 1.50 SOL) | Кривая: ${realSol.toFixed(1)} SOL`,
       });
     }
 
-    const momentumEval = tickBuf.evaluateMomentumEntry();
-    if (!momentumEval.isSignalValid) {
-      this.recordDecision({
-        id: `rej-mom-${Date.now()}`,
-        timeStr: 'Только что',
-        kind: 'rejected',
-        symbol: cand.symbol,
-        mint: cand.mint,
-        actionRu: `Отклонен ${cand.symbol}`,
-        reasonRu: 'dP/dt impulse < 1.8%',
-        detailsRu: 'Недостаточный импульс покупок в стакане.',
-      });
+    const inflowEval = tickBuf.evaluateCorridorNetInflowEntry();
+    if (!inflowEval.isSignalValid) {
+      if (!isNewToken) {
+        this.recordDecision({
+          id: `cand-focus-${Date.now()}`,
+          timeStr: 'Только что',
+          kind: 'candidate',
+          symbol: cand.symbol,
+          mint: cand.mint,
+          actionRu: `🎯 $${cand.symbol} | Кривая: ${realSol.toFixed(1)} SOL`,
+          reasonRu: `${inflowEval.reasonRu} | Покупателей: ${inflowEval.uniqueBuyersCount}`,
+        });
+      }
       return;
     }
 
     // 5. Economic Edge Gate
-    const maxTrade = this.state.microLive?.maxTradeSol || 0.01;
-    const jitoTip = this.state.gas?.referenceFastTipSol || 0.00008;
+    const maxTrade = 0.035; // Base lot size 0.035 SOL
+    const jitoTip = 0.0004; // Fixed 0.0004 SOL Jito Tip
 
     const economicEdge = this.scamFilter.evaluateEconomicEdge({
       tradeSizeSol: maxTrade,
@@ -823,7 +903,7 @@ export class LiveApkBackendAdapter implements EngineBackend {
       symbol: cand.symbol,
       mint: cand.mint,
       actionRu: `СИГНАЛ / ПОКУПКА ${cand.symbol}`,
-      reasonRu: 'Импульс +3.4% | Запуск Jito Bundle',
+      reasonRu: `Приток +${inflowEval.netSolInflow.toFixed(2)} SOL/5с | Покупателей: ${inflowEval.uniqueBuyersCount}`,
     });
 
     const tradeSize = Math.min(maxTrade * advisoryMultiplier, availableSol);
@@ -834,9 +914,22 @@ export class LiveApkBackendAdapter implements EngineBackend {
     if (this.isExecutingTrade || this.state.activePosition !== null) return;
     this.isExecutingTrade = true;
 
+    // Record high-priority BUY TRIGGER / TRADE_ATTEMPT decision
+    this.recordDecision({
+      id: `trade-attempt-${Date.now()}`,
+      timeStr: 'Только что',
+      kind: 'trade_attempt',
+      symbol: cand.symbol,
+      mint: cand.mint,
+      actionRu: `🔥 [ВЫСТРЕЛ JITO] ${cand.symbol}`,
+      reasonRu: `Отправка бандла Jito (${amountSol.toFixed(4)} SOL)... -> Ожидание блока`,
+      bundleStatus: 'Pending',
+    });
+
     try {
       const cuLimit = 165000; // Fast cached profile +10% buffer
-      const jitoTip = this.state.gas?.referenceFastTipSol || 0.00008;
+      // Fixed Jito Tip for 0.035 SOL trade lot = 0.0004 SOL (~1.1% overhead)
+      const jitoTip = DEFAULT_JITO_TIP_SOL;
       const jitoTipLamports = Math.round(jitoTip * LAMPORTS_PER_SOL);
 
       // Deduct balance
@@ -927,7 +1020,7 @@ export class LiveApkBackendAdapter implements EngineBackend {
         currentPriceSol: entryPrice,
         currentPercent: 0,
         holdTimeSec: 0,
-        stopLossPercent: -3.5,
+        stopLossPercent: -15.0,
         lastOfiSol: 0,
         peakPercent: 0,
         remainingTokensPct: 100,
@@ -1037,8 +1130,8 @@ export class LiveApkBackendAdapter implements EngineBackend {
       // TAKE-PROFIT LADDER (КАСКАДНЫЙ ВЫХОД)
       // ==========================================
 
-      // Tier 1: при росте +30% продать 50% купленных токенов через Jito-бандл
-      if (currentPct >= 30 && !pos.tier1Closed) {
+      // Tier 1: при росте +25% продать 50% купленных токенов через Jito-бандл
+      if (currentPct >= 25 && !pos.tier1Closed) {
         const closedOk = await this.executePartialExitOrder(50, `Тейк-профит Tier 1 (+${currentPct}%): продажа 50% позиции через Jito`);
         if (closedOk) {
           pos.tier1Closed = true;
@@ -1046,27 +1139,15 @@ export class LiveApkBackendAdapter implements EngineBackend {
         return;
       }
 
-      // Tier 2: при росте +60% продать 30% купленных токенов (остается 20%)
-      if (currentPct >= 60 && !pos.tier2Closed) {
-        const closedOk = await this.executePartialExitOrder(30, `Тейк-профит Tier 2 (+${currentPct}%): продажа 30% позиции через Jito`);
-        if (closedOk) {
-          pos.tier2Closed = true;
-        }
+      // Tier 2: при росте +60% продать оставшиеся 50% токенов (полный выход 100%)
+      if (currentPct >= 60) {
+        await this.executeFullExitOrder(`Тейк-профит Tier 2 (+${currentPct}%): полный каскадный выход 100% через Jito`);
         return;
       }
 
-      // Tier 3: оставшиеся 20% удерживать скользящим трейлингом (выход при развороте цены на 5% от пика)
-      if (pos.tier2Closed && (pos.remainingTokensPct ?? 0) > 0) {
-        const peak = pos.peakPercent ?? currentPct;
-        if (peak >= 60 && currentPct <= peak - 5) {
-          await this.executeFullExitOrder(`Трейлинг-стоп Tier 3 (пик +${peak}%, откат до +${currentPct}%): фиксация остатка 20%`);
-          return;
-        }
-      }
-
-      // Protective Stop-Loss (-3.5%)
-      if (currentPct <= pos.stopLossPercent) {
-        await this.executeFullExitOrder(`Защитный стоп-лосс (${currentPct}%): цена достигла порога отсечения`);
+      // Protective Stop-Loss (-15%)
+      if (currentPct <= pos.stopLossPercent || currentPct <= -15.0) {
+        await this.executeFullExitOrder(`Защитный стоп-лосс (${currentPct}%): отсечение убытка (-15%)`);
         return;
       }
 
@@ -1076,15 +1157,10 @@ export class LiveApkBackendAdapter implements EngineBackend {
         return;
       }
 
-      // Сценарный Time-Stop: если за 60 секунд монета не дала импульса (> +5%) и PnL околонулевой — выход 100%
-      if (pos.holdTimeSec >= 60) {
-        if (currentPct < 5.0) {
-          await this.executeFullExitOrder(`Сценарный Time-Stop (60 сек без импульса, ${currentPct}%): принудительный рыночный выход 100%`);
-          return;
-        } else if (pos.holdTimeSec >= 120) {
-          await this.executeFullExitOrder(`Предельный тайм-аут (120 сек): полное закрытие позиции`);
-          return;
-        }
+      // Сценарный Time-Stop: 40 секунд без импульса (защита от затухания пампа)
+      if (pos.holdTimeSec >= 40) {
+        await this.executeFullExitOrder(`⏳ ТАЙМ-СТОП (40с): Затухание импульса, принудительное закрытие позиции по рынку`);
+        return;
       }
 
       this.notify();

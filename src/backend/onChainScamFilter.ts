@@ -117,13 +117,21 @@ export class OnChainScamFilter {
       };
     }
 
-    // 1c. Creator holding check: reject if creator > 15%
+    // 1c. Creator holding check: CTO Absorption Aware
     if (meta.creatorHoldingPct !== undefined && meta.creatorHoldingPct > 15) {
+      const devSoldEst = (meta.creatorHoldingPct / 100) * 5; // estimated SOL
+      const netInflow = (meta as any).netSolInflow10s || 0;
+      if (netInflow > devSoldEst) {
+        return {
+          passed: true,
+          rejectReasonRu: `⚡ CTO / Выкуп пролива: Дев вышел, чистый приток +${netInflow.toFixed(2)} SOL`,
+        };
+      }
       return {
         passed: false,
         code: 'CREATOR_HOLDING_HIGH',
-        rejectReasonRu: 'Сговор создателя: доля разработчика превышает 15%',
-        detailsRu: `Создатель удерживает ${meta.creatorHoldingPct.toFixed(1)}% эмиссии вне кривой ликвидности (макс. лимит 15%).`,
+        rejectReasonRu: 'Пролив создателя не выкуплен рынком',
+        detailsRu: `Создатель продал/удерживает ${meta.creatorHoldingPct.toFixed(1)}%, приток (${netInflow.toFixed(2)} SOL) еще не поглотил объем дева.`,
       };
     }
 

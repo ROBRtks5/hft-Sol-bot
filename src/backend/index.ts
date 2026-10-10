@@ -101,6 +101,13 @@ class EngineProxy implements EngineBackend {
     return false;
   }
 
+  public getTopCorridorCandidates() {
+    if (this.activeBackend.getTopCorridorCandidates) {
+      return this.activeBackend.getTopCorridorCandidates();
+    }
+    return [];
+  }
+
   public getStatus() {
     return this.activeBackend.getStatus();
   }

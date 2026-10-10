@@ -21,6 +21,7 @@ export interface PriceTick {
   tokenReserve: number;
   volumeBuySol: number;
   volumeSellSol: number;
+  buyerWallet?: string;
   slot?: number;
 }
 
@@ -172,6 +173,129 @@ export class CircularTickBuffer {
       dp2000ms,
       ofi5s: ofiSol,
       reasonRu: `Импульс подтвержден: dP/dt 500мс +${dp500ms.toFixed(2)}%, OFI +${ofiSol.toFixed(4)} SOL`,
+    };
+  }
+
+  /**
+   * Calculate Net SOL Inflow and Count Unique Buyers over rolling window (e.g. 5000ms).
+   * netSolInflow = sum(buySol) - sum(sellSol)
+   * uniqueBuyersCount = count of unique wallet addresses making buys >= 0.01 SOL
+   */
+  public calculateNetInflowAndBuyers(windowMs: number = 5000): {
+    netSolInflow: number;
+    buyVolSol: number;
+    sellVolSol: number;
+    uniqueBuyersCount: number;
+  } {
+    if (this.ticks.length === 0) {
+      return { netSolInflow: 0, buyVolSol: 0, sellVolSol: 0, uniqueBuyersCount: 0 };
+    }
+
+    const now = this.ticks[this.ticks.length - 1].timestampMs;
+    const thresholdTime = now - windowMs;
+
+    let buyVol = 0;
+    let sellVol = 0;
+    const uniqueBuyers = new Set<string>();
+
+    for (let i = this.ticks.length - 1; i >= 0; i--) {
+      const tick = this.ticks[i];
+      if (tick.timestampMs < thresholdTime) break;
+
+      buyVol += tick.volumeBuySol || 0;
+      sellVol += tick.volumeSellSol || 0;
+
+      if ((tick.volumeBuySol || 0) >= 0.01) {
+        const walletKey = tick.buyerWallet || `buyer_${i}`;
+        uniqueBuyers.add(walletKey);
+      }
+    }
+
+    const netSolInflow = buyVol - sellVol;
+    return {
+      netSolInflow: Number(netSolInflow.toFixed(4)),
+      buyVolSol: Number(buyVol.toFixed(4)),
+      sellVolSol: Number(sellVol.toFixed(4)),
+      uniqueBuyersCount: uniqueBuyers.size,
+    };
+  }
+
+  /**
+   * Get maximum price in rolling time window (e.g. 30000ms).
+   */
+  public getMaxPriceInWindow(windowMs: number = 30000): number {
+    if (this.ticks.length === 0) return 0;
+    const now = this.ticks[this.ticks.length - 1].timestampMs;
+    const thresholdTime = now - windowMs;
+
+    let maxPrice = 0;
+    for (let i = this.ticks.length - 1; i >= 0; i--) {
+      const tick = this.ticks[i];
+      if (tick.timestampMs < thresholdTime) break;
+      if (tick.priceSol > maxPrice) {
+        maxPrice = tick.priceSol;
+      }
+    }
+    return maxPrice;
+  }
+
+  /**
+   * Strategy: Corridor Hunter 6-25 SOL & Net Inflow Analysis
+   * Entry trigger requirements:
+   * 1) netSolInflow >= 1.5 SOL over 5s window
+   * 2) uniqueBuyersCount >= 4 unique buyers
+   * 3) Current price is within 5% of max price over last 30s
+   */
+  public evaluateCorridorNetInflowEntry(): {
+    isSignalValid: boolean;
+    netSolInflow: number;
+    uniqueBuyersCount: number;
+    priceNearPeak: boolean;
+    reasonRu: string;
+  } {
+    const { netSolInflow, uniqueBuyersCount } = this.calculateNetInflowAndBuyers(5000);
+    const maxPrice30s = this.getMaxPriceInWindow(30000);
+    const currentTick = this.getLatestTick();
+    const currentPrice = currentTick?.priceSol || 0;
+
+    const priceNearPeak = maxPrice30s > 0 ? currentPrice >= maxPrice30s * 0.95 : true;
+
+    if (netSolInflow < 1.5) {
+      return {
+        isSignalValid: false,
+        netSolInflow,
+        uniqueBuyersCount,
+        priceNearPeak,
+        reasonRu: `В фокусе: накопление притока (${netSolInflow.toFixed(2)} / 1.50 SOL)`,
+      };
+    }
+
+    if (uniqueBuyersCount < 4) {
+      return {
+        isSignalValid: false,
+        netSolInflow,
+        uniqueBuyersCount,
+        priceNearPeak,
+        reasonRu: `Недостаточно покупателей (${uniqueBuyersCount} / 4 unique buyers)`,
+      };
+    }
+
+    if (!priceNearPeak) {
+      return {
+        isSignalValid: false,
+        netSolInflow,
+        uniqueBuyersCount,
+        priceNearPeak: false,
+        reasonRu: `Цена откатилась более 5% от максимума 30с`,
+      };
+    }
+
+    return {
+      isSignalValid: true,
+      netSolInflow,
+      uniqueBuyersCount,
+      priceNearPeak: true,
+      reasonRu: `ВХОД ПО ПРИТОКУ: +${netSolInflow.toFixed(2)} SOL/5с, Покупателей: ${uniqueBuyersCount}, Около пика`,
     };
   }
 

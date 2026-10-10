@@ -16,6 +16,7 @@ import {
 import { EngineBackend, EngineStateV2 } from './backend';
 import { defaultTradeWalJournal, WalTradeRecord } from './backend/tradeWalJournal';
 import { SecureStorage, convertHttpToWsUrl } from './secureStorage';
+import { TargetMetric } from './types/backend';
 
 type Tab = 'control' | 'journal' | 'settings';
 
@@ -33,6 +34,7 @@ export default function App() {
   const [publicAddress, setPublicAddress] = useState<string | null>(null);
   const [isActionPending, setIsActionPending] = useState<boolean>(false);
   const [journalSubTab, setJournalSubTab] = useState<'trades' | 'radar'>('radar');
+  const [topTargets, setTopTargets] = useState<TargetMetric[]>([]);
   const [rpcInput, setRpcInput] = useState<string>(() => EngineBackend.getCustomRpcUrl?.() || '');
 
   const refreshWalFeed = async () => {
@@ -59,6 +61,8 @@ export default function App() {
         lastDecisionsCount = currentDecisionsCount;
         refreshWalFeed();
       }
+      const liveCandidates = EngineBackend.getTopCorridorCandidates ? EngineBackend.getTopCorridorCandidates() : [];
+      setTopTargets(liveCandidates);
     });
     refreshWalFeed();
     return () => unsub();
@@ -90,6 +94,7 @@ export default function App() {
     if (EngineBackend.setCustomRpcUrl) {
       await EngineBackend.setCustomRpcUrl(rpcInput);
       triggerToast('RPC узел сохранен и переподключен');
+      await refreshWalletMeta();
     }
   };
 
@@ -358,10 +363,10 @@ export default function App() {
   const isGateOpen = gateBlockedReason === null;
 
   return (
-    <div className="min-h-screen bg-[#090d10] text-slate-100 font-sans flex flex-col justify-between max-w-md mx-auto relative select-none border-x border-[#1a232d] shadow-2xl">
+    <div className="h-screen max-h-screen w-full max-w-md mx-auto bg-[#090d10] text-slate-100 font-sans flex flex-col justify-between relative select-none border-x border-[#1a232d] shadow-2xl overflow-hidden">
       {/* Top Header */}
       <header 
-        className="px-5 pb-3 border-b border-[#16202a] flex items-center justify-between"
+        className="shrink-0 px-5 pb-3 border-b border-[#16202a] flex items-center justify-between"
         style={{ paddingTop: 'max(env(safe-area-inset-top, 0px), 16px)' }}
       >
         <h1 className="text-base font-bold tracking-wider text-slate-200">
@@ -376,7 +381,7 @@ export default function App() {
       </header>
 
       {/* Main Content Area */}
-      <main className="flex-1 px-4 py-4 overflow-y-auto space-y-4">
+      <main className="flex-1 min-h-0 px-4 py-4 overflow-y-auto space-y-4">
         {/* ========================================================================= */}
         {/* 1. ПУЛЬТ                                                                  */}
         {/* ========================================================================= */}
@@ -563,43 +568,131 @@ export default function App() {
 
             {/* Live Logs List */}
             <div className="bg-[#121820] p-3 rounded-xl border border-slate-800 font-mono text-[11px] leading-relaxed space-y-2 min-h-[360px]">
-              {journalSubTab === 'radar' || (walTrades.length === 0 && (!engine.closedDeals || engine.closedDeals.length === 0)) ? (
-                <div className="space-y-2">
+              {journalSubTab === 'radar' ? (
+                <div className="space-y-3">
+                  {/* Interactive Candidate Funnel Inspector */}
+                  <div className="bg-[#0b0f14] p-2.5 rounded-xl border border-amber-500/40 space-y-2">
+                    <div className="flex justify-between items-center border-b border-slate-800 pb-1.5">
+                      <div className="flex items-center space-x-1.5">
+                        <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                        <span className="text-[11px] font-bold tracking-wider text-amber-300 uppercase font-mono">
+                          🎯 ТОП ЦЕЛЕЙ НА ПРИЦЕЛЕ (ONLINE)
+                        </span>
+                      </div>
+                      <span className="text-[10px] font-mono text-slate-400">
+                        Отсев: <span className="text-rose-400 font-bold">{engine.rejectedByFilters || 0}</span>
+                      </span>
+                    </div>
+
+                    {/* Candidate Cards */}
+                    <div className="space-y-1.5">
+                      {topTargets && topTargets.length > 0 ? (
+                        topTargets.map((target, idx) => {
+                          const isHighReadiness = target.readinessScore >= 85;
+                          const formattedMint = target.mint.length > 12 ? `${target.mint.slice(0, 4)}...${target.mint.slice(-4)}` : target.mint;
+
+                          return (
+                            <div 
+                              key={`${target.mint}-${idx}`}
+                              className={`p-2 rounded-lg border text-[10px] font-mono transition-all ${
+                                isHighReadiness
+                                  ? 'bg-amber-950/30 border-amber-500/80 shadow-sm shadow-amber-500/10 animate-pulse'
+                                  : 'bg-[#10161d] border-slate-800'
+                              }`}
+                            >
+                              <div className="flex justify-between items-center mb-1">
+                                <div className="flex items-center space-x-1.5">
+                                  <span className="font-bold text-slate-100 text-xs">${target.symbol}</span>
+                                  <button
+                                    onClick={() => {
+                                      navigator.clipboard.writeText(target.mint);
+                                      triggerToast(`Mint ${formattedMint} скопирован`);
+                                    }}
+                                    className="text-[9px] text-slate-400 hover:text-amber-300 font-mono underline cursor-pointer"
+                                    title="Нажмите для копирования Mint адреса"
+                                  >
+                                    ({formattedMint})
+                                  </button>
+                                  <span className="px-1.5 py-0.2 rounded text-[8px] font-bold bg-amber-950/80 text-amber-300 border border-amber-800/60">
+                                    {target.ctoBadgeRu}
+                                  </span>
+                                </div>
+                                <span className={`px-1.5 py-0.2 rounded font-bold text-[9px] ${isHighReadiness ? 'bg-amber-500 text-slate-950' : 'bg-slate-800 text-slate-300'}`}>
+                                  ГОТОВНОСТЬ: {target.readinessScore}%
+                                </span>
+                              </div>
+
+                              <div className="grid grid-cols-3 gap-1 text-[9px] text-slate-300 mb-1.5">
+                                <div>Кривая: <span className="text-amber-300 font-bold">{target.curveSol} SOL</span></div>
+                                <div>Приток: <span className="text-emerald-400 font-bold">{target.netInflowSol >= 0 ? '+' : ''}{target.netInflowSol} SOL/5с</span></div>
+                                <div>Покупателей: <span className="text-slate-100 font-bold">{target.buyersCount}</span></div>
+                              </div>
+
+                              {/* Progress bar */}
+                              <div className="w-full bg-slate-800 h-1 rounded-full overflow-hidden">
+                                <div 
+                                  className={`h-full transition-all duration-500 ${isHighReadiness ? 'bg-amber-400' : 'bg-emerald-500'}`} 
+                                  style={{ width: `${target.readinessScore}%` }}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })
+                      ) : (
+                        <div className="py-3 text-center text-slate-500 text-[10px] font-mono leading-relaxed bg-[#10161d] rounded-lg border border-slate-800/60 p-2.5">
+                          <p className="font-semibold text-slate-300 mb-0.5">Поиск кандидатов в коридоре 6–25 SOL...</p>
+                          <p className="text-[9px] text-slate-500">
+                            {engine.mode === 'PAUSED' ? '(Целей на сопровождении нет — сокет на паузе)' : '(Целей на сопровождении нет — ожидание ончейн-притока)'}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Decisions Log Feed */}
                   {engine.decisions && engine.decisions.length > 0 ? (
-                    engine.decisions.slice(0, 20).map((dec) => {
+                    engine.decisions.slice(0, 30).map((dec) => {
+                      const isAttempt = dec.kind === 'trade_attempt' || dec.actionRu.includes('ВЫСТРЕЛ');
+                      const isSignal = dec.kind === 'bought' || dec.actionRu.includes('ПОКУПКА');
+                      const isCandidate = dec.kind === 'candidate' || dec.actionRu.includes('КАНДИДАТ') || dec.actionRu.includes('ГОТОВНОСТЬ');
                       const isReject = dec.kind === 'rejected' || dec.actionRu.includes('Отклонен');
-                      const isCandidate = dec.kind === 'candidate' || dec.actionRu.includes('КАНДИДАТ');
-                      const isSignal = dec.kind === 'bought' || dec.actionRu.includes('СИГНАЛ') || dec.actionRu.includes('Куплен');
 
                       let badgeText = '🔴 [ОТСЕВ]';
                       let badgeClass = 'bg-rose-950/80 text-rose-400 border border-rose-800/60';
-                      if (isCandidate) {
-                        badgeText = '🟡 [КАНДИДАТ]';
-                        badgeClass = 'bg-amber-950/80 text-amber-400 border border-amber-800/60';
+                      let containerClass = 'border-b border-slate-800/60 pb-2 last:border-b-0';
+
+                      if (isAttempt) {
+                        badgeText = '🔥 [ВЫСТРЕЛ JITO]';
+                        badgeClass = 'bg-amber-500 text-slate-950 border border-amber-300 font-black animate-pulse';
+                        containerClass = 'bg-amber-950/30 border border-amber-500/80 p-2 rounded-lg shadow-sm';
                       } else if (isSignal) {
-                        badgeText = '🟢 [СИГНАЛ / ПОКУПКА]';
-                        badgeClass = 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/60';
+                        badgeText = '🟢 [ПОКУПКА ПОДТВЕРЖДЕНА]';
+                        badgeClass = 'bg-emerald-950/90 text-emerald-300 border border-emerald-500/80 font-bold';
+                        containerClass = 'bg-emerald-950/30 border border-emerald-500/60 p-2 rounded-lg';
+                      } else if (isCandidate) {
+                        badgeText = '🎯 [КАНДИДАТ / ГОТОВНОСТЬ]';
+                        badgeClass = 'bg-amber-950/80 text-amber-300 border border-amber-800/60';
                       }
 
                       const rawMint = dec.mint || dec.symbol;
                       const formattedMint = rawMint.length > 12 ? `${rawMint.slice(0, 4)}...${rawMint.slice(-4)}` : rawMint;
 
                       return (
-                        <div key={dec.id} className="border-b border-slate-800/60 pb-2 last:border-b-0">
+                        <div key={dec.id} className={containerClass}>
                           <div className="flex justify-between items-center text-[10px] text-slate-400 mb-1">
-                            <span className={`px-1.5 py-0.5 rounded font-bold text-[9px] ${badgeClass}`}>
+                            <span className={`px-1.5 py-0.5 rounded text-[9px] ${badgeClass}`}>
                               {badgeText}
                             </span>
-                            <span className="font-mono text-slate-500">{dec.timeStr}</span>
+                            <span className="font-mono text-slate-400">{dec.timeStr}</span>
                           </div>
                           <div className="flex justify-between items-center text-xs">
                             <div>
                               <span className="text-slate-400 font-mono text-[10px] mr-1.5">MINT: <span className="text-slate-200">{formattedMint}</span></span>
-                              <span className="text-slate-100 font-semibold">{dec.symbol}</span>
+                              <span className="text-slate-100 font-bold">{dec.symbol}</span>
                             </div>
                           </div>
                           <div className="text-[10px] text-slate-300 mt-1 font-mono">
-                            Причина: <span className={isReject ? 'text-rose-300 font-semibold' : isCandidate ? 'text-amber-300' : 'text-emerald-300'}>{dec.reasonRu}</span>
+                            Причина: <span className={isReject ? 'text-rose-300' : isCandidate ? 'text-amber-300' : 'text-emerald-300 font-semibold'}>{dec.reasonRu}</span>
                           </div>
                         </div>
                       );
@@ -610,14 +703,83 @@ export default function App() {
                       <p className="text-xs text-slate-500">
                         Ожидание ончейн-событий Pump.fun и Raydium...
                       </p>
-                      <p className="text-[10px] text-slate-600 font-mono mt-2">
-                        Детектор тиков и фильтры скама активны.
-                      </p>
                     </div>
                   )}
                 </div>
               ) : (
-                <div className="space-y-2">
+                /* Subtab: DEALS / СДЕЛКИ */
+                <div className="space-y-3">
+                  {/* Active Position in Deals tab */}
+                  {engine.activePosition && (
+                    <div className="bg-emerald-950/40 border-2 border-emerald-500/80 p-3 rounded-xl space-y-2 shadow-lg">
+                      <div className="flex justify-between items-center">
+                        <div className="flex items-center space-x-2">
+                          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                          <span className="text-xs font-bold text-emerald-300 uppercase tracking-wider">
+                            АКТИВНАЯ ПОЗИЦИЯ: {engine.activePosition.symbol}
+                          </span>
+                        </div>
+                        <span className={`text-xs font-mono font-bold px-2 py-0.5 rounded ${engine.activePosition.currentPercent >= 0 ? 'bg-emerald-900 text-emerald-300' : 'bg-rose-900 text-rose-300'}`}>
+                          {engine.activePosition.currentPercent >= 0 ? '+' : ''}{engine.activePosition.currentPercent}%
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2 text-[11px] font-mono text-slate-300 bg-[#0c1218] p-2 rounded-lg">
+                        <div>Вход: <span className="text-slate-100 font-bold">{engine.activePosition.entrySol} SOL</span></div>
+                        <div>Цена: <span className="text-slate-100 font-bold">{engine.activePosition.entryPriceSol.toFixed(8)}</span></div>
+                        <div>Пик PnL: <span className="text-emerald-400 font-bold">+{engine.activePosition.peakPercent || 0}%</span></div>
+                        <div>Стоп-лосс: <span className="text-rose-400 font-bold">{engine.activePosition.stopLossPercent}%</span></div>
+                      </div>
+                      <button
+                        onClick={handleEmergencyStop}
+                        className="w-full py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-[10px] font-bold uppercase tracking-wider rounded-lg transition-colors cursor-pointer"
+                      >
+                        ⚡ АВАРИЙНЫЙ СБРОС ПОЗИЦИИ (100% JITO)
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Trade Attempts / Buy Signals from decisions */}
+                  {engine.decisions && engine.decisions.filter((d) => d.kind === 'trade_attempt' || d.kind === 'bought' || d.kind === 'sold' || d.actionRu.includes('ПОКУПКА') || d.actionRu.includes('ВЫСТРЕЛ')).length > 0 && (
+                    <div className="space-y-2">
+                      {engine.decisions
+                        .filter((d) => d.kind === 'trade_attempt' || d.kind === 'bought' || d.kind === 'sold' || d.actionRu.includes('ПОКУПКА') || d.actionRu.includes('ВЫСТРЕЛ'))
+                        .slice(0, 10)
+                        .map((dec) => {
+                          const isAttempt = dec.kind === 'trade_attempt' || dec.actionRu.includes('ВЫСТРЕЛ');
+                          const isSuccess = dec.kind === 'bought' || dec.actionRu.includes('ПОКУПКА');
+                          
+                          let containerStyle = 'bg-amber-950/40 border border-amber-500/80 p-2.5 rounded-xl space-y-1';
+                          let badgeText = '🔥 [ОТПРАВКА БАНДЛА JITO...]';
+                          let badgeStyle = 'bg-amber-500 text-slate-950 font-black';
+
+                          if (isSuccess) {
+                            containerStyle = 'bg-emerald-950/40 border border-emerald-500/80 p-2.5 rounded-xl space-y-1';
+                            badgeText = '🟢 [ПОКУПКА ИСПОЛНЕНА]';
+                            badgeStyle = 'bg-emerald-500 text-slate-950 font-bold';
+                          }
+
+                          return (
+                            <div key={dec.id} className={containerStyle}>
+                              <div className="flex justify-between items-center text-[10px]">
+                                <span className={`px-1.5 py-0.5 rounded text-[9px] ${badgeStyle}`}>
+                                  {badgeText}
+                                </span>
+                                <span className="font-mono text-slate-400">{dec.timeStr}</span>
+                              </div>
+                              <div className="flex justify-between items-center text-xs font-bold text-slate-100">
+                                <span>{dec.symbol}</span>
+                                <span className="text-amber-300 font-mono text-[10px]">JITO BUNDLE</span>
+                              </div>
+                              <div className="text-[10px] text-slate-300 font-mono">
+                                Status: <span className="text-slate-100">{dec.reasonRu}</span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                    </div>
+                  )}
+
+                  {/* Completed WAL Trades */}
                   {walTrades.length > 0 ? (
                     walTrades.map((trade) => (
                       <div key={trade.id} className="border-b border-slate-800/60 pb-2 last:border-b-0">
@@ -677,11 +839,20 @@ export default function App() {
                         </div>
                       </div>
                     ))
-                  ) : (
-                    <div className="text-center py-20 text-slate-400 space-y-2">
-                      <p className="text-sm font-semibold text-slate-300">Сделок пока нет</p>
-                      <p className="text-xs text-slate-500">
-                        Переключитесь на [ РАДАР РЕШЕНИЙ ] для просмотра отсева кандидатов.
+                  ) : null}
+
+                  {/* Empty state when no active position, no trade attempts, and no closed deals */}
+                  {!engine.activePosition &&
+                   (!engine.decisions || engine.decisions.filter((d) => d.kind === 'trade_attempt' || d.kind === 'bought' || d.kind === 'sold' || d.actionRu.includes('ПОКУПКА') || d.actionRu.includes('ВЫСТРЕЛ')).length === 0) &&
+                   walTrades.length === 0 &&
+                   (!engine.closedDeals || engine.closedDeals.length === 0) && (
+                    <div className="text-center py-16 text-slate-400 space-y-2">
+                      <div className="w-10 h-10 rounded-full bg-slate-800/80 flex items-center justify-center mx-auto text-emerald-400">
+                        <Activity className="w-5 h-5" />
+                      </div>
+                      <p className="text-xs font-bold text-slate-200">Открытых позиций нет. Ожидание сигнала</p>
+                      <p className="text-[11px] text-slate-400 leading-relaxed max-w-[260px] mx-auto">
+                        Робот автономно сканирует блоки Pump.fun и Raydium. Выстрелы Jito отобразятся здесь.
                       </p>
                     </div>
                   )}
@@ -933,7 +1104,7 @@ export default function App() {
       </main>
 
       {/* Bottom Navigation Bar: EXACTLY 3 TABS */}
-      <nav className="border-t border-[#16202a] bg-[#0c1117] px-6 py-2 flex justify-between items-center">
+      <nav className="shrink-0 border-t border-[#16202a] bg-[#0c1117] px-6 py-2 flex justify-between items-center z-20">
         <button
           onClick={() => setActiveTab('control')}
           className={`flex flex-col items-center space-y-1 py-1 cursor-pointer transition-colors ${
