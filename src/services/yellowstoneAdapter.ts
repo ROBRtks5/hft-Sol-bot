@@ -22,6 +22,23 @@ export class YellowstoneGrpcAdapter {
     if (customWsUrl) { this.wsUrl = customWsUrl; }
   }
 
+  public getWsUrl(): string {
+    return this.wsUrl;
+  }
+
+  public setWsUrl(newWsUrl: string) {
+    if (!newWsUrl || this.wsUrl === newWsUrl) return;
+    this.wsUrl = newWsUrl;
+    if (this.socket) {
+      try { this.socket.close(); } catch { /* ignore */ }
+      this.socket = null;
+    }
+    this.reconnectAttempts = 0;
+    if (this.isRunning) {
+      this.connectWebSocket();
+    }
+  }
+
   public subscribe(listener: YellowstoneStreamListener): () => void {
     this.listeners.push(listener);
     if (this.listeners.length === 1 && !this.isRunning) { this.startStream(); }

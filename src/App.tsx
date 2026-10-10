@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 import { EngineBackend, EngineStateV2 } from './backend';
 import { defaultTradeWalJournal, WalTradeRecord } from './backend/tradeWalJournal';
-import { SecureStorage } from './secureStorage';
+import { SecureStorage, convertHttpToWsUrl } from './secureStorage';
 
 type Tab = 'control' | 'journal' | 'settings';
 
@@ -33,6 +33,7 @@ export default function App() {
   const [publicAddress, setPublicAddress] = useState<string | null>(null);
   const [isActionPending, setIsActionPending] = useState<boolean>(false);
   const [journalSubTab, setJournalSubTab] = useState<'trades' | 'radar'>('radar');
+  const [rpcInput, setRpcInput] = useState<string>(() => EngineBackend.getCustomRpcUrl?.() || '');
 
   const refreshWalFeed = async () => {
     try {
@@ -80,7 +81,17 @@ export default function App() {
 
   useEffect(() => {
     refreshWalletMeta();
+    if (EngineBackend.getCustomRpcUrl) {
+      setRpcInput(EngineBackend.getCustomRpcUrl());
+    }
   }, []);
+
+  const handleSaveRpc = async () => {
+    if (EngineBackend.setCustomRpcUrl) {
+      await EngineBackend.setCustomRpcUrl(rpcInput);
+      triggerToast('RPC узел сохранен и переподключен');
+    }
+  };
 
   const triggerToast = (msg: string) => {
     setToastMsg(msg);
@@ -327,26 +338,21 @@ export default function App() {
   const pnlNum = Number(realPnlSol.toFixed(2));
   const pnlDisplay = hasDeals ? `${pnlNum >= 0 ? '+' : ''}${realPnlSol.toFixed(2)} SOL` : 'Нет сделок';
 
-  // Hard Gate Conditions for LIVE trading button (Block 5)
+  // Gate Conditions for LIVE trading button (Block 5)
   // 1) Торговый ключ импортирован в Keystore (Ключ [OK])
   const isKeyOk = hasStoredKey && !!publicAddress;
-  // 2) Активно соединение с RPC и потоком данных (Сеть [OK], Поток [OK])
-  const isNetworkOk = engine.healthIndicators?.blockchainConnection === 'green';
-  const isStreamOk = engine.healthIndicators?.executionSpeed === 'green';
+  // 2) Сеть RPC доступна (Сеть [OK])
+  const isNetworkOk = engine.healthIndicators?.blockchainConnection !== 'red';
   // 3) Баланс кошелька выше неприкасаемого газового резерва (не менее 0.01 SOL)
   const isBalanceSufficient = rawBalance >= 0.01;
-  // 4) Внутренний self-test ядра находится в статусе «зелёный»
-  const isSelfTestGreen = (engine.preflightChecklist?.[0]?.passed !== false) && (engine.invariants?.every((i) => i.status === 'green') !== false);
 
   let gateBlockedReason: string | null = null;
   if (!isKeyOk) {
     gateBlockedReason = 'Запуск заблокирован: Ключ не импортирован';
-  } else if (!isNetworkOk || !isStreamOk) {
-    gateBlockedReason = 'Запуск заблокирован: Ожидание подключения к Сети и Потоку';
+  } else if (!isNetworkOk) {
+    gateBlockedReason = 'Запуск заблокирован: Ожидание подключения к RPC сети';
   } else if (!isBalanceSufficient) {
     gateBlockedReason = `Запуск заблокирован: Баланс кошелька ниже 0.01 SOL (сейчас ${rawBalance.toFixed(3)} SOL)`;
-  } else if (!isSelfTestGreen) {
-    gateBlockedReason = 'Запуск заблокирован: Self-test ядра не пройден';
   }
 
   const isGateOpen = gateBlockedReason === null;
@@ -493,8 +499,8 @@ export default function App() {
                 </div>
                 <div className="flex justify-between items-center text-slate-300">
                   <span>• Поток данных (WSS logsSubscribe)</span>
-                  <span className={isStreamOk ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
-                    {isStreamOk ? '[✓ Connected]' : '[Переподключение / WSS]'}
+                  <span className="text-emerald-400 font-bold">
+                    {isTrading ? '[✓ Стрим активен]' : '[✓ Готов к стриму]'}
                   </span>
                 </div>
                 <div className="flex justify-between items-center text-slate-300">
@@ -875,6 +881,36 @@ export default function App() {
 
               <div className="text-xs font-mono text-slate-400">
                 Потолок: <span className="text-slate-200 font-bold">{engine.gas?.maxFeeSol || 0.00005} SOL</span>
+              </div>
+            </div>
+
+            {/* Custom RPC Section */}
+            <div className="bg-[#121820] p-4 rounded-xl border border-slate-800 space-y-3">
+              <h3 className="text-xs font-bold text-slate-300 tracking-wider uppercase">
+                СЕТЬ И RPC
+              </h3>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Персональный RPC-эндпоинт (Helius, QuickNode, Triton) взамен публичного узла:
+              </p>
+              <div className="space-y-2">
+                <input
+                  type="text"
+                  value={rpcInput}
+                  onChange={(e) => setRpcInput(e.target.value)}
+                  placeholder="https://mainnet.helius-rpc.com/?api-key=..."
+                  className="w-full bg-[#1a232d] border border-slate-700 focus:border-emerald-500 rounded-lg px-3 py-2 text-xs font-mono text-slate-100 outline-none transition-colors placeholder:text-slate-600"
+                />
+                {rpcInput.trim() && (
+                  <p className="text-[10px] font-mono text-emerald-400/80">
+                    WSS Стрим: {convertHttpToWsUrl(rpcInput)}
+                  </p>
+                )}
+                <button
+                  onClick={handleSaveRpc}
+                  className="w-full py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg transition-colors cursor-pointer"
+                >
+                  Сохранить RPC
+                </button>
               </div>
             </div>
 

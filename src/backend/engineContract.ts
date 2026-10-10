@@ -59,6 +59,8 @@ export interface EngineBackend {
   getKeepAwakeAdapter(): KeepAwakeAdapter;
   syncRealAccount?(): Promise<void>;
   setRiskLimits?(limits: { maxTradeSol?: number; maxDailyLossSol?: number; maxConsecutiveLosses?: number }): Promise<void>;
+  setCustomRpcUrl?(rpcUrl: string): Promise<boolean>;
+  getCustomRpcUrl?(): string;
 
   // Методы чтения (Read-Only)
   getStatus(): Promise<TrafficLightStatus>;

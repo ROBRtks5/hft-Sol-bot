@@ -36,6 +36,22 @@ export interface SecureStorageAdapter {
 
 const ENCRYPTED_SEED_STORAGE_KEY = '__alpha_keystore_enc_v2';
 const METADATA_STORAGE_KEY = '__alpha_keystore_meta_v2';
+const CUSTOM_RPC_STORAGE_KEY = '__alpha_custom_rpc_v1';
+
+export function convertHttpToWsUrl(httpUrl: string): string {
+  if (!httpUrl || !httpUrl.trim()) return 'wss://api.mainnet-beta.solana.com';
+  const url = httpUrl.trim();
+  if (url.startsWith('https://')) {
+    return 'wss://' + url.slice(8);
+  }
+  if (url.startsWith('http://')) {
+    return 'ws://' + url.slice(7);
+  }
+  if (url.startsWith('wss://') || url.startsWith('ws://')) {
+    return url;
+  }
+  return 'wss://' + url;
+}
 
 class MobileSecureStorageService implements SecureStorageAdapter {
   private isApkRuntime: boolean;
@@ -316,6 +332,27 @@ class MobileSecureStorageService implements SecureStorageAdapter {
 
     // В веб-превью: безопасный фоллбэк без алертов
     return true;
+  }
+
+  public getCustomRpcUrl(): string {
+    try {
+      return localStorage.getItem(CUSTOM_RPC_STORAGE_KEY) || '';
+    } catch {
+      return '';
+    }
+  }
+
+  public storeCustomRpcUrl(url: string): void {
+    try {
+      const cleaned = url.trim();
+      if (cleaned) {
+        localStorage.setItem(CUSTOM_RPC_STORAGE_KEY, cleaned);
+      } else {
+        localStorage.removeItem(CUSTOM_RPC_STORAGE_KEY);
+      }
+    } catch {
+      // ignore
+    }
   }
 }
 

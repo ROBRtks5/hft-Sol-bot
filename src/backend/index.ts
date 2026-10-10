@@ -87,6 +87,20 @@ class EngineProxy implements EngineBackend {
     }
   }
 
+  public getCustomRpcUrl(): string {
+    if (this.activeBackend.getCustomRpcUrl) {
+      return this.activeBackend.getCustomRpcUrl();
+    }
+    return '';
+  }
+
+  public async setCustomRpcUrl(rpcUrl: string): Promise<boolean> {
+    if (this.activeBackend.setCustomRpcUrl) {
+      return await this.activeBackend.setCustomRpcUrl(rpcUrl);
+    }
+    return false;
+  }
+
   public getStatus() {
     return this.activeBackend.getStatus();
   }

@@ -53,7 +53,7 @@ import { OnChainScamFilter } from './onChainScamFilter';
 import { defaultJitoBundleBuilder, JitoBundleBuilder } from './jitoBundleBuilder';
 import { defaultTradeWalJournal, TradeWalJournal, WalTradeRecord } from './tradeWalJournal';
 import { defaultPostMortemOptimizer, PostMortemOptimizer } from './postMortemOptimizer';
-import { SecureStorage } from '../secureStorage';
+import { SecureStorage, convertHttpToWsUrl } from '../secureStorage';
 import { Connection, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js';
 
 /**
@@ -95,6 +95,8 @@ export class LiveApkBackendAdapter implements EngineBackend {
   public readonly MIN_GAS_RESERVE_SOL = 0.01;
 
   private watchdogTimer: any = null;
+  private watchdogSilenceWindowMs = 35000;
+  private watchdogBackoffMultiplier = 1;
   private scannedMintsSet: Set<string> = new Set();
 
   // Quantum HFT In-Memory Engine instances (Transplanted from Rust Alpha-Flip HFT)
@@ -107,6 +109,12 @@ export class LiveApkBackendAdapter implements EngineBackend {
       throw new Error('LIVE INVARIANT VIOLATION: LiveApkBackendAdapter strictly requires RealSolanaSigningAdapter. Mocks are forbidden in live path.');
     }
     this.keepAwakeAdapter = keepAwakeAdapter || createKeepAwakeAdapter();
+
+    const storedRpc = SecureStorage.getCustomRpcUrl();
+    if (storedRpc) {
+      this.solanaRpcUrl = storedRpc;
+      defaultYellowstoneAdapter.setWsUrl(convertHttpToWsUrl(storedRpc));
+    }
 
     this.baselineParams = {
       greed: 70,
@@ -303,19 +311,26 @@ export class LiveApkBackendAdapter implements EngineBackend {
       const now = Date.now();
       const realAdapter = this.signingAdapter as RealSolanaSigningAdapter;
       const hasKey = realAdapter.hasKey();
-      const isMonitoredMode = ['OBSERVE', 'SHADOW', 'MICRO_LIVE', 'PAUSED', 'SIMULATION'].includes(this.state.mode);
 
-      if (hasKey && isMonitoredMode && (now - (this.state.lastTickTimestamp || 0) > 12000)) {
-        this.state.liveActionTextRu = 'Внимание: Зависание WSS. Переподключение...';
-        this.state.healthIndicators.blockchainConnection = 'yellow';
-        this.state.lastTickTimestamp = now;
-        this.notify();
-        try {
-          defaultYellowstoneAdapter.disconnect();
-          defaultYellowstoneAdapter.connect();
-        } catch (e) {
-          console.warn('[Watchdog]: Ошибка при реконнекте сокета:', e);
+      // Сторожевой таймер активации WSS реконнекта работает ТОЛЬКО в боевом режиме MICRO_LIVE
+      if (this.state.mode === 'MICRO_LIVE' && hasKey) {
+        const timeoutMs = this.watchdogSilenceWindowMs * this.watchdogBackoffMultiplier;
+        if (now - (this.state.lastTickTimestamp || 0) > timeoutMs) {
+          this.state.liveActionTextRu = `Внимание: Задержка тиков WSS (> ${Math.round(timeoutMs / 1000)}с). Переподключение...`;
+          this.state.healthIndicators.blockchainConnection = 'yellow';
+          this.state.lastTickTimestamp = now;
+          this.watchdogBackoffMultiplier = Math.min(this.watchdogBackoffMultiplier * 1.5, 4);
+          this.notify();
+          try {
+            defaultYellowstoneAdapter.disconnect();
+            defaultYellowstoneAdapter.connect();
+          } catch (e) {
+            console.warn('[Watchdog]: Ошибка при реконнекте сокета:', e);
+          }
         }
+      } else {
+        // В режиме ожидания (PAUSED / READY) не рвем сокет и поддерживаем нормальный статус
+        this.watchdogBackoffMultiplier = 1;
       }
     }, 5000);
   }
@@ -1405,6 +1420,22 @@ export class LiveApkBackendAdapter implements EngineBackend {
     this.isExecutingTrade = false;
     this.isExiting = false;
     this.notify();
+  }
+
+  public getCustomRpcUrl(): string {
+    return SecureStorage.getCustomRpcUrl();
+  }
+
+  public async setCustomRpcUrl(rpcUrl: string): Promise<boolean> {
+    const cleaned = rpcUrl.trim();
+    const effectiveRpc = cleaned || 'https://api.mainnet-beta.solana.com';
+    SecureStorage.storeCustomRpcUrl(cleaned);
+    this.solanaRpcUrl = effectiveRpc;
+    const wsUrl = convertHttpToWsUrl(effectiveRpc);
+    defaultYellowstoneAdapter.setWsUrl(wsUrl);
+    await this.syncRealAccount();
+    this.notify();
+    return true;
   }
 
   public async setRiskLimits(limits: { maxTradeSol?: number; maxDailyLossSol?: number; maxConsecutiveLosses?: number }): Promise<void> {
