@@ -107,8 +107,9 @@ export interface HealthIndicators {
 export interface DecisionItem {
   id: string;
   timeStr: string;
-  kind: 'bought' | 'rejected' | 'sold';
+  kind: 'bought' | 'rejected' | 'sold' | 'candidate';
   symbol: string;
+  mint?: string;
   actionRu: string;
   reasonRu: string;
   detailsRu?: string;
@@ -389,6 +390,10 @@ export interface EngineStateV2 {
   backendType: 'simulator' | 'live_apk';
   isLiveConnected: boolean;
   lastSyncTs: number;
+  totalTicksReceived: number;
+  candidatesScanned: number;
+  rejectedByFilters: number;
+  lastTickTimestamp: number;
   needsYou: NeedsYouCard | null;
   requestInboxCount: number;
   requestInboxList: NeedsYouCard[];

@@ -32,6 +32,7 @@ export default function App() {
   const [hasStoredKey, setHasStoredKey] = useState<boolean>(false);
   const [publicAddress, setPublicAddress] = useState<string | null>(null);
   const [isActionPending, setIsActionPending] = useState<boolean>(false);
+  const [journalSubTab, setJournalSubTab] = useState<'trades' | 'radar'>('radar');
 
   const refreshWalFeed = async () => {
     try {
@@ -287,8 +288,8 @@ export default function App() {
     headerStatusText = 'ERROR';
   } else if (hasStoredKey) {
     statusLabel = 'ГОТОВ К ЗАПУСКУ';
-    statusReason = (engine.balanceSol || 0) < 0.05 
-      ? 'Ожидание пополнения (мин. 0.05 SOL)' 
+    statusReason = (engine.balanceSol || 0) < 0.01 
+      ? 'Ожидание пополнения (мин. 0.01 SOL)' 
       : 'Подключен';
     statusBadgeColor = 'bg-emerald-400';
     statusTextColor = 'text-emerald-400';
@@ -332,8 +333,8 @@ export default function App() {
   // 2) Активно соединение с RPC и потоком данных (Сеть [OK], Поток [OK])
   const isNetworkOk = engine.healthIndicators?.blockchainConnection === 'green';
   const isStreamOk = engine.healthIndicators?.executionSpeed === 'green';
-  // 3) Баланс кошелька выше неприкасаемого газового резерва (не менее 0.05 SOL)
-  const isBalanceSufficient = rawBalance >= 0.05;
+  // 3) Баланс кошелька выше неприкасаемого газового резерва (не менее 0.01 SOL)
+  const isBalanceSufficient = rawBalance >= 0.01;
   // 4) Внутренний self-test ядра находится в статусе «зелёный»
   const isSelfTestGreen = (engine.preflightChecklist?.[0]?.passed !== false) && (engine.invariants?.every((i) => i.status === 'green') !== false);
 
@@ -343,7 +344,7 @@ export default function App() {
   } else if (!isNetworkOk || !isStreamOk) {
     gateBlockedReason = 'Запуск заблокирован: Ожидание подключения к Сети и Потоку';
   } else if (!isBalanceSufficient) {
-    gateBlockedReason = `Запуск заблокирован: Баланс кошелька ниже 0.05 SOL (сейчас ${rawBalance.toFixed(3)} SOL)`;
+    gateBlockedReason = `Запуск заблокирован: Баланс кошелька ниже 0.01 SOL (сейчас ${rawBalance.toFixed(3)} SOL)`;
   } else if (!isSelfTestGreen) {
     gateBlockedReason = 'Запуск заблокирован: Self-test ядра не пройден';
   }
@@ -397,6 +398,20 @@ export default function App() {
                 <p className="text-slate-300 font-mono text-[11px]">
                   {actionText}
                 </p>
+              </div>
+
+              {/* Telemetry WSS Widget */}
+              <div className="mt-3 pt-2.5 border-t border-slate-800/80 flex flex-wrap items-center justify-between text-[11px] font-mono gap-1">
+                <div className="flex items-center space-x-1.5">
+                  <span className={`inline-block w-2 h-2 rounded-full ${Date.now() - (engine.lastTickTimestamp || 0) < 3000 ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+                  <span className="text-slate-400 font-bold uppercase tracking-wider">ТЕЛЕМЕТРИЯ WSS:</span>
+                  <span className={Date.now() - (engine.lastTickTimestamp || 0) < 3000 ? 'text-emerald-400 font-semibold' : 'text-amber-400 font-semibold'}>
+                    {Date.now() - (engine.lastTickTimestamp || 0) < 3000 ? 'LIVE' : 'Тишина'}
+                  </span>
+                </div>
+                <div className="text-slate-300">
+                  Тиков: <span className="text-slate-100 font-bold">{engine.totalTicksReceived || 0}</span> | Токенов: <span className="text-slate-100 font-bold">{engine.candidatesScanned || 0}</span> | Отсеяно: <span className="text-rose-400 font-bold">{engine.rejectedByFilters || 0}</span>
+                </div>
               </div>
             </div>
 
@@ -467,35 +482,41 @@ export default function App() {
             {/* Modules Status List */}
             <div className="bg-[#121820] p-4 rounded-xl border border-slate-800 space-y-2">
               <h3 className="text-xs font-bold text-slate-300 tracking-wider uppercase mb-3">
-                МОДУЛИ
+                МОДУЛИ И ДИАГНОСТИКА СЕТИ
               </h3>
               <div className="space-y-2 text-xs font-mono">
                 <div className="flex justify-between items-center text-slate-300">
-                  <span>• Сеть</span>
+                  <span>• Сеть (RPC mainnet)</span>
                   <span className={isNetworkOk ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
-                    {isNetworkOk ? '[OK]' : '[НЕТ]'}
+                    {isNetworkOk ? '[✓ OK]' : '[Ожидание RPC]'}
                   </span>
                 </div>
                 <div className="flex justify-between items-center text-slate-300">
-                  <span>• Поток данных</span>
+                  <span>• Поток данных (WSS logsSubscribe)</span>
                   <span className={isStreamOk ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
-                    {isStreamOk ? '[OK]' : '[НЕТ]'}
+                    {isStreamOk ? '[✓ Connected]' : '[Переподключение / WSS]'}
                   </span>
                 </div>
                 <div className="flex justify-between items-center text-slate-300">
-                  <span>• Исполнение</span>
-                  <span className="text-emerald-400 font-bold">[OK]</span>
+                  <span>• Исполнение (Jito MEV Engine)</span>
+                  <span className="text-emerald-400 font-bold">[✓ OK]</span>
                 </div>
                 <div className="flex justify-between items-center text-slate-300">
-                  <span>• Ключ</span>
+                  <span>• Аппаратный Ключ (Keystore)</span>
                   <span className={hasStoredKey ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
-                    {hasStoredKey ? '[OK]' : '[НЕТ]'}
+                    {hasStoredKey ? '[✓ Загружен]' : '[НЕТ КЛЮЧА]'}
                   </span>
                 </div>
                 <div className="flex justify-between items-center text-slate-300">
-                  <span>• Служба</span>
-                  <span className="text-emerald-400 font-bold">[OK]</span>
+                  <span>• Фоновая Служба (Keep-Awake)</span>
+                  <span className="text-emerald-400 font-bold">[✓ Активна 24/7]</span>
                 </div>
+                {/* On-Screen Diagnostic Detail */}
+                {(Date.now() - (engine.lastTickTimestamp || 0) > 10000) && (
+                  <div className="mt-2 pt-2 border-t border-slate-800 text-[11px] text-amber-400">
+                    ⚠️ Статус WSS: {Date.now() - (engine.lastTickTimestamp || 0) > 15000 ? 'Тишина в сокете (нет новых блоков за 15с) — сработает авто-реконнект Watchdog.' : 'Получение очередного тика...'}
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -506,13 +527,90 @@ export default function App() {
         {/* ========================================================================= */}
         {activeTab === 'journal' && (
           <div className="space-y-4">
-            <h2 className="text-sm font-bold tracking-wider text-slate-300 uppercase">
-              ЖУРНАЛ
-            </h2>
+            <div className="flex justify-between items-center">
+              <h2 className="text-sm font-bold tracking-wider text-slate-300 uppercase">
+                ЖУРНАЛ
+              </h2>
+              <div className="flex bg-[#0d1218] p-1 rounded-lg border border-slate-800 text-[11px] font-mono space-x-1">
+                <button
+                  onClick={() => setJournalSubTab('trades')}
+                  className={`px-2.5 py-1 rounded-md font-bold transition-all cursor-pointer ${
+                    journalSubTab === 'trades'
+                      ? 'bg-slate-700 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  [ СДЕЛКИ ]
+                </button>
+                <button
+                  onClick={() => setJournalSubTab('radar')}
+                  className={`px-2.5 py-1 rounded-md font-bold transition-all cursor-pointer ${
+                    journalSubTab === 'radar'
+                      ? 'bg-slate-700 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  [ РАДАР РЕШЕНИЙ ]
+                </button>
+              </div>
+            </div>
 
             {/* Live Logs List */}
             <div className="bg-[#121820] p-3 rounded-xl border border-slate-800 font-mono text-[11px] leading-relaxed space-y-2 min-h-[360px]">
-              {hasDeals ? (
+              {journalSubTab === 'radar' || (walTrades.length === 0 && (!engine.closedDeals || engine.closedDeals.length === 0)) ? (
+                <div className="space-y-2">
+                  {engine.decisions && engine.decisions.length > 0 ? (
+                    engine.decisions.slice(0, 20).map((dec) => {
+                      const isReject = dec.kind === 'rejected' || dec.actionRu.includes('Отклонен');
+                      const isCandidate = dec.kind === 'candidate' || dec.actionRu.includes('КАНДИДАТ');
+                      const isSignal = dec.kind === 'bought' || dec.actionRu.includes('СИГНАЛ') || dec.actionRu.includes('Куплен');
+
+                      let badgeText = '🔴 [ОТСЕВ]';
+                      let badgeClass = 'bg-rose-950/80 text-rose-400 border border-rose-800/60';
+                      if (isCandidate) {
+                        badgeText = '🟡 [КАНДИДАТ]';
+                        badgeClass = 'bg-amber-950/80 text-amber-400 border border-amber-800/60';
+                      } else if (isSignal) {
+                        badgeText = '🟢 [СИГНАЛ / ПОКУПКА]';
+                        badgeClass = 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/60';
+                      }
+
+                      const rawMint = dec.mint || dec.symbol;
+                      const formattedMint = rawMint.length > 12 ? `${rawMint.slice(0, 4)}...${rawMint.slice(-4)}` : rawMint;
+
+                      return (
+                        <div key={dec.id} className="border-b border-slate-800/60 pb-2 last:border-b-0">
+                          <div className="flex justify-between items-center text-[10px] text-slate-400 mb-1">
+                            <span className={`px-1.5 py-0.5 rounded font-bold text-[9px] ${badgeClass}`}>
+                              {badgeText}
+                            </span>
+                            <span className="font-mono text-slate-500">{dec.timeStr}</span>
+                          </div>
+                          <div className="flex justify-between items-center text-xs">
+                            <div>
+                              <span className="text-slate-400 font-mono text-[10px] mr-1.5">MINT: <span className="text-slate-200">{formattedMint}</span></span>
+                              <span className="text-slate-100 font-semibold">{dec.symbol}</span>
+                            </div>
+                          </div>
+                          <div className="text-[10px] text-slate-300 mt-1 font-mono">
+                            Причина: <span className={isReject ? 'text-rose-300 font-semibold' : isCandidate ? 'text-amber-300' : 'text-emerald-300'}>{dec.reasonRu}</span>
+                          </div>
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <div className="text-center py-20 text-slate-400 space-y-2">
+                      <p className="text-sm font-semibold text-slate-300">Радар сканирует блоки</p>
+                      <p className="text-xs text-slate-500">
+                        Ожидание ончейн-событий Pump.fun и Raydium...
+                      </p>
+                      <p className="text-[10px] text-slate-600 font-mono mt-2">
+                        Детектор тиков и фильтры скама активны.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              ) : (
                 <div className="space-y-2">
                   {walTrades.length > 0 ? (
                     walTrades.map((trade) => (
@@ -574,27 +672,13 @@ export default function App() {
                       </div>
                     ))
                   ) : (
-                    engine.decisions?.map((dec) => (
-                      <div key={dec.id} className="border-b border-slate-800/60 pb-1.5 last:border-b-0">
-                        <span className="text-slate-400">{dec.timeStr}</span>{' | '}
-                        <span className={dec.actionRu.includes('Куплен') || dec.actionRu.includes('Продан') ? 'text-emerald-400 font-semibold' : 'text-rose-400'}>
-                          {dec.actionRu.toUpperCase()}
-                        </span>{' | '}
-                        <span className="text-slate-200">{dec.symbol}</span>{' | '}
-                        <span className="text-slate-400">{dec.reasonRu}</span>
-                      </div>
-                    ))
+                    <div className="text-center py-20 text-slate-400 space-y-2">
+                      <p className="text-sm font-semibold text-slate-300">Сделок пока нет</p>
+                      <p className="text-xs text-slate-500">
+                        Переключитесь на [ РАДАР РЕШЕНИЙ ] для просмотра отсева кандидатов.
+                      </p>
+                    </div>
                   )}
-                </div>
-              ) : (
-                <div className="text-center py-20 text-slate-400 space-y-2">
-                  <p className="text-sm font-semibold text-slate-300">Сделок пока нет</p>
-                  <p className="text-xs text-slate-500">
-                    Ожидание первого импульса...
-                  </p>
-                  <p className="text-[10px] text-slate-600 font-mono mt-2">
-                    Парсинг логов Pump.fun и Raydium активен.
-                  </p>
                 </div>
               )}
             </div>

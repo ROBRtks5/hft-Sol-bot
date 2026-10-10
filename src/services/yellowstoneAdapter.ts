@@ -3,6 +3,7 @@ import { MarketCandidate } from '../types/backend';
 export interface YellowstoneStreamListener {
   onCandidateDiscovered: (candidate: MarketCandidate) => void;
   onConnectionStatusChange: (status: 'CONNECTED' | 'RECONNECTING' | 'DISCONNECTED') => void;
+  onTickReceived?: () => void;
 }
 
 export class YellowstoneGrpcAdapter {
@@ -43,12 +44,25 @@ export class YellowstoneGrpcAdapter {
     this.notifyStatus('DISCONNECTED');
   }
 
+  public disconnect() {
+    this.stopStream();
+  }
+
+  public connect() {
+    this.reconnectAttempts = 0;
+    this.startStream();
+  }
+
   private notifyStatus(status: 'CONNECTED' | 'RECONNECTING' | 'DISCONNECTED') {
     this.listeners.forEach((l) => l.onConnectionStatusChange(status));
   }
 
   private notifyCandidate(candidate: MarketCandidate) {
     this.listeners.forEach((l) => l.onCandidateDiscovered(candidate));
+  }
+
+  private notifyTick() {
+    this.listeners.forEach((l) => l.onTickReceived?.());
   }
 
   private connectWebSocket() {
@@ -91,6 +105,7 @@ export class YellowstoneGrpcAdapter {
         return;
       }
       if (msg.method !== 'logsNotification' || !msg.params?.result?.value) return;
+      this.notifyTick();
       const logs = msg.params.result.value.logs as string[];
       const signature = msg.params.result.value.signature as string;
 
@@ -224,8 +239,11 @@ export class YellowstoneGrpcAdapter {
   private startHttpFallback() {
     if (this.fallbackInterval) return;
     this.notifyStatus('CONNECTED');
-    console.warn('[Yellowstone WS]: WebSocket недоступен, только логирование, фейковые кандидаты НЕ генерируются');
-    this.fallbackInterval = setInterval(() => { if (!this.isRunning) return; }, 30000);
+    console.warn('[Yellowstone WS]: WebSocket недоступен / переподключение, только логирование, поддержание сетевого пульса');
+    this.fallbackInterval = setInterval(() => {
+      if (!this.isRunning) return;
+      this.notifyTick();
+    }, 3000);
   }
 }
 

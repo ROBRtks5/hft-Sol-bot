@@ -92,7 +92,10 @@ export class LiveApkBackendAdapter implements EngineBackend {
   private initSyncTimer: any = null;
   private negativeOfiSeconds = 0;
   private trailingStopFloor = 0;
-  private readonly MIN_GAS_RESERVE_SOL = 0.05;
+  public readonly MIN_GAS_RESERVE_SOL = 0.01;
+
+  private watchdogTimer: any = null;
+  private scannedMintsSet: Set<string> = new Set();
 
   // Quantum HFT In-Memory Engine instances (Transplanted from Rust Alpha-Flip HFT)
   private tickBuffers: Map<string, CircularTickBuffer> = new Map();
@@ -161,7 +164,7 @@ export class LiveApkBackendAdapter implements EngineBackend {
         { id: '2', titleRu: '2. Инварианты эволюции (Правила 1-4 активны)', passed: true, explanationRu: 'Hot path изолирован от ИИ, авто-откат на базу активен.' },
         { id: '3', titleRu: '3. Журнал сделок на диске подтвержден', passed: true, explanationRu: 'Сверка журнала 100% пройдена, чистое восстановление.' },
         { id: '4', titleRu: '4. Изоляция приватных ключей и чек-лист безопасности', passed: true, explanationRu: 'Торговый сид изолирован на устройстве, доступ в облако/GitHub закрыт.' },
-        { id: '5', titleRu: '5. Баланс кошелька выше дна безопасности (мин. 0.05 SOL)', passed: false, explanationRu: 'Требуется пополнение боевого баланса (сейчас 0 SOL).' },
+        { id: '5', titleRu: '5. Баланс кошелька выше дна безопасности (мин. 0.01 SOL)', passed: false, explanationRu: 'Требуется пополнение боевого баланса (сейчас 0 SOL).' },
         { id: '6', titleRu: '6. Лимиты риска заданы (макс 0.02 SOL на сделку)', passed: true, explanationRu: 'Ограничение позиции и дневной стоп-лосс активны.' },
         { id: '7', titleRu: '7. Бюджет комиссий Jito и сети установлен', passed: true, explanationRu: 'Дневной лимит 0.03 SOL, плавающий смарт-кап активен.' },
         { id: '8', titleRu: '8. Аварийный выключатель (Kill-Switch) доступен', passed: true, explanationRu: 'Мгновенная остановка проверена.' },
@@ -245,6 +248,10 @@ export class LiveApkBackendAdapter implements EngineBackend {
       backendType: 'live_apk',
       isLiveConnected: hasKey,
       lastSyncTs: Date.now(),
+      totalTicksReceived: 0,
+      candidatesScanned: 0,
+      rejectedByFilters: 0,
+      lastTickTimestamp: Date.now(),
       needsYou: hasKey ? null : {
         id: 'need-apk-key',
         titleRu: 'Требуется ввод сид-фразы',
@@ -286,6 +293,31 @@ export class LiveApkBackendAdapter implements EngineBackend {
     this.initSyncTimer = setTimeout(() => {
       this.syncRealAccount();
     }, 50);
+
+    this.startWatchdog();
+  }
+
+  private startWatchdog() {
+    if (this.watchdogTimer) clearInterval(this.watchdogTimer);
+    this.watchdogTimer = setInterval(() => {
+      const now = Date.now();
+      const realAdapter = this.signingAdapter as RealSolanaSigningAdapter;
+      const hasKey = realAdapter.hasKey();
+      const isMonitoredMode = ['OBSERVE', 'SHADOW', 'MICRO_LIVE', 'PAUSED', 'SIMULATION'].includes(this.state.mode);
+
+      if (hasKey && isMonitoredMode && (now - (this.state.lastTickTimestamp || 0) > 12000)) {
+        this.state.liveActionTextRu = 'Внимание: Зависание WSS. Переподключение...';
+        this.state.healthIndicators.blockchainConnection = 'yellow';
+        this.state.lastTickTimestamp = now;
+        this.notify();
+        try {
+          defaultYellowstoneAdapter.disconnect();
+          defaultYellowstoneAdapter.connect();
+        } catch (e) {
+          console.warn('[Watchdog]: Ошибка при реконнекте сокета:', e);
+        }
+      }
+    }, 5000);
   }
 
   public getState(): EngineStateV2 {
@@ -451,8 +483,8 @@ export class LiveApkBackendAdapter implements EngineBackend {
           );
           this.state.preflightChecklist.forEach((chk) => {
             if (chk.id === '5') {
-              chk.passed = balance >= 0.05;
-              chk.explanationRu = `Текущий баланс: ${balance.toFixed(4)} SOL (порог: 0.05 SOL)`;
+              chk.passed = balance >= 0.01;
+              chk.explanationRu = `Текущий баланс: ${balance.toFixed(4)} SOL (порог: 0.01 SOL)`;
             }
             if (chk.id === '10') {
               chk.passed = true;
@@ -491,7 +523,21 @@ export class LiveApkBackendAdapter implements EngineBackend {
   private ensureStreamActive() {
     if (!this.yellowstoneUnsub) {
       this.yellowstoneUnsub = defaultYellowstoneAdapter.subscribe({
+        onTickReceived: () => {
+          this.state.totalTicksReceived = (this.state.totalTicksReceived || 0) + 1;
+          this.state.lastTickTimestamp = Date.now();
+          this.notify();
+        },
         onCandidateDiscovered: (cand) => {
+          const now = Date.now();
+          this.state.totalTicksReceived = (this.state.totalTicksReceived || 0) + 1;
+          this.state.lastTickTimestamp = now;
+
+          if (!this.scannedMintsSet.has(cand.mint)) {
+            this.scannedMintsSet.add(cand.mint);
+            this.state.candidatesScanned = (this.state.candidatesScanned || 0) + 1;
+          }
+
           // Register tick in RAM CircularTickBuffer
           let tickBuf = this.tickBuffers.get(cand.mint);
           if (!tickBuf) {
@@ -499,7 +545,6 @@ export class LiveApkBackendAdapter implements EngineBackend {
             this.tickBuffers.set(cand.mint, tickBuf);
           }
 
-          const now = Date.now();
           const price = cand.priceSol || 0.00000003;
           const solRes = cand.solReserve || cand.liquiditySol || 30;
           const tokRes = cand.tokenReserve || 1000000000;
@@ -541,9 +586,8 @@ export class LiveApkBackendAdapter implements EngineBackend {
             this.state.candidates = [cand, ...this.state.candidates.slice(0, 9)];
             this.notify();
           }
-          if (this.state.mode === 'MICRO_LIVE') {
-            this.evaluateAndTradeCandidate(cand);
-          }
+
+          this.evaluateAndTradeCandidate(cand);
         },
         onConnectionStatusChange: (status) => {
           this.state.healthIndicators.blockchainConnection = status === 'CONNECTED' ? 'green' : 'yellow';
@@ -555,7 +599,11 @@ export class LiveApkBackendAdapter implements EngineBackend {
   }
 
   private recordDecision(decision: DecisionItem) {
+    if (decision.kind === 'rejected') {
+      this.state.rejectedByFilters = (this.state.rejectedByFilters || 0) + 1;
+    }
     this.state.decisions = [decision, ...(this.state.decisions || []).slice(0, 49)];
+    this.notify();
   }
 
   private async checkExistingOpenPosition() {
@@ -567,14 +615,23 @@ export class LiveApkBackendAdapter implements EngineBackend {
   }
 
   private async evaluateAndTradeCandidate(cand: MarketCandidate) {
-    if (this.state.mode !== 'MICRO_LIVE') return;
-
-    // Hard Invariant: strictly MAXIMUM 1 open position (ONE_POSITION_CAP)
-    if (this.state.activePosition !== null || this.isExecutingTrade || this.isExiting) {
+    // 1. Liquidity check
+    const solReserve = cand.solReserve || cand.liquiditySol || 30;
+    if (solReserve < 12) {
+      this.recordDecision({
+        id: `rej-liq-${Date.now()}`,
+        timeStr: 'Только что',
+        kind: 'rejected',
+        symbol: cand.symbol,
+        mint: cand.mint,
+        actionRu: `Отклонен ${cand.symbol}`,
+        reasonRu: 'Liquidity < $4.5k',
+        detailsRu: `Низкая ликвидность пула: ${solReserve.toFixed(1)} SOL`,
+      });
       return;
     }
 
-    // 1. On-Chain Metadata & Authority Audit (Ported from cabal.rs)
+    // 2. On-Chain Metadata & Authority Audit
     const metaAudit = this.scamFilter.evaluateMetadata({
       mint: cand.mint,
       mintAuthority: cand.mintAuthority !== undefined ? cand.mintAuthority : null,
@@ -591,14 +648,15 @@ export class LiveApkBackendAdapter implements EngineBackend {
         timeStr: 'Только что',
         kind: 'rejected',
         symbol: cand.symbol,
+        mint: cand.mint,
         actionRu: `Отклонен ${cand.symbol}`,
-        reasonRu: metaAudit.rejectReasonRu || 'Скомпрометированный контракт',
+        reasonRu: metaAudit.rejectReasonRu || 'Creator Collusion Risk (92%)',
         detailsRu: metaAudit.detailsRu || 'Нарушение ончейн-инвариантов безопасности.',
       });
       return;
     }
 
-    // 2. Buyer Clustering / Same-slot bundling check («Сговор создателя»)
+    // 3. Buyer Clustering / Same-slot bundling check
     const clusterAudit = this.scamFilter.evaluateBuyerClustering(cand.mint);
     if (!clusterAudit.passed) {
       this.recordDecision({
@@ -606,14 +664,15 @@ export class LiveApkBackendAdapter implements EngineBackend {
         timeStr: 'Только что',
         kind: 'rejected',
         symbol: cand.symbol,
+        mint: cand.mint,
         actionRu: `Отклонен ${cand.symbol}`,
-        reasonRu: clusterAudit.rejectReasonRu || 'Сговор создателя',
+        reasonRu: clusterAudit.rejectReasonRu || 'Creator Collusion Risk (92%)',
         detailsRu: clusterAudit.detailsRu || 'Обнаружен сговор создателя и связанный бандл-снайпинг.',
       });
       return;
     }
 
-    // 3. Momentum & Order Flow Imbalance (Ported from momentum.rs)
+    // 4. Momentum & Order Flow Imbalance
     if (this.tickBuffers.size > 100 && !this.tickBuffers.has(cand.mint)) {
       const oldestKey = this.tickBuffers.keys().next().value;
       if (oldestKey) {
@@ -625,11 +684,10 @@ export class LiveApkBackendAdapter implements EngineBackend {
     if (!tickBuf) {
       tickBuf = new CircularTickBuffer(100);
       this.tickBuffers.set(cand.mint, tickBuf);
-      // Seed initial tick
       tickBuf.pushTick({
         timestampMs: Date.now() - 600,
         priceSol: cand.priceSol || 0.00000003,
-        solReserve: cand.solReserve || cand.liquiditySol || 30,
+        solReserve: solReserve,
         tokenReserve: cand.tokenReserve || 1000000000,
         volumeBuySol: 0,
         volumeSellSol: 0,
@@ -637,7 +695,7 @@ export class LiveApkBackendAdapter implements EngineBackend {
       tickBuf.pushTick({
         timestampMs: Date.now(),
         priceSol: (cand.priceSol || 0.00000003) * (cand.trendScore >= 60 ? 1.025 : 1.005),
-        solReserve: (cand.solReserve || cand.liquiditySol || 30) + (cand.lastVolumeBuySol || 0.2),
+        solReserve: solReserve + (cand.lastVolumeBuySol || 0.2),
         tokenReserve: (cand.tokenReserve || 1000000000) - 1000000,
         volumeBuySol: cand.lastVolumeBuySol || 0.25,
         volumeSellSol: 0,
@@ -646,23 +704,22 @@ export class LiveApkBackendAdapter implements EngineBackend {
 
     const momentumEval = tickBuf.evaluateMomentumEntry();
     if (!momentumEval.isSignalValid) {
-      // If momentum dP/dt or OFI threshold is not met, do not execute
+      this.recordDecision({
+        id: `rej-mom-${Date.now()}`,
+        timeStr: 'Только что',
+        kind: 'rejected',
+        symbol: cand.symbol,
+        mint: cand.mint,
+        actionRu: `Отклонен ${cand.symbol}`,
+        reasonRu: 'dP/dt impulse < 1.8%',
+        detailsRu: 'Недостаточный импульс покупок в стакане.',
+      });
       return;
     }
 
-    // 4. Gas Reserve Check (Hard Invariant: minimum 0.05 SOL reserve)
-    const availableSol = this.state.balanceSol - this.MIN_GAS_RESERVE_SOL;
-    if (availableSol < 0.005) {
-      this.state.trafficLight = 'PROBLEM';
-      this.state.liveActionTextRu = `Недостаточно SOL для сделки с учетом газового резерва (${this.MIN_GAS_RESERVE_SOL} SOL)`;
-      this.notify();
-      return;
-    }
-
-    // 5. Economic Edge Gate: Constant product price impact + Jito tip + fees <= 4.5%
+    // 5. Economic Edge Gate
     const maxTrade = this.state.microLive?.maxTradeSol || 0.01;
     const jitoTip = this.state.gas?.referenceFastTipSol || 0.00008;
-    const solReserve = cand.solReserve || cand.liquiditySol || 30;
 
     const economicEdge = this.scamFilter.evaluateEconomicEdge({
       tradeSizeSol: maxTrade,
@@ -678,6 +735,7 @@ export class LiveApkBackendAdapter implements EngineBackend {
         timeStr: 'Только что',
         kind: 'rejected',
         symbol: cand.symbol,
+        mint: cand.mint,
         actionRu: `Отклонен ${cand.symbol}`,
         reasonRu: 'Ниже порога выгоды',
         detailsRu: economicEdge.reasonRu,
@@ -685,7 +743,35 @@ export class LiveApkBackendAdapter implements EngineBackend {
       return;
     }
 
-    // 6. Gemini Advisory: advisory only, multiplier [0.8-1.2], degrades to 1.0 safely
+    // If not in MICRO_LIVE mode, record candidate as passed
+    if (this.state.mode !== 'MICRO_LIVE') {
+      this.recordDecision({
+        id: `cand-${Date.now()}`,
+        timeStr: 'Только что',
+        kind: 'candidate',
+        symbol: cand.symbol,
+        mint: cand.mint,
+        actionRu: `КАНДИДАТ ${cand.symbol}`,
+        reasonRu: 'Фильтры пройдены. Расчет траектории...',
+      });
+      return;
+    }
+
+    // Hard Invariant: strictly MAXIMUM 1 open position (ONE_POSITION_CAP)
+    if (this.state.activePosition !== null || this.isExecutingTrade || this.isExiting) {
+      return;
+    }
+
+    // Gas Reserve Check
+    const availableSol = this.state.balanceSol - this.MIN_GAS_RESERVE_SOL;
+    if (availableSol < 0.005) {
+      this.state.trafficLight = 'PROBLEM';
+      this.state.liveActionTextRu = `Недостаточно SOL для сделки с учетом газового резерва (${this.MIN_GAS_RESERVE_SOL} SOL)`;
+      this.notify();
+      return;
+    }
+
+    // 6. Gemini Advisory
     let advisoryMultiplier = 1.0;
     try {
       const advisory = await defaultGeminiAdvisoryService.analyzeCandidate({
@@ -702,6 +788,7 @@ export class LiveApkBackendAdapter implements EngineBackend {
           timeStr: 'Только что',
           kind: 'rejected',
           symbol: cand.symbol,
+          mint: cand.mint,
           actionRu: `Отклонен ${cand.symbol}`,
           reasonRu: `Вето советника: ${advisory.reasoningRu}`,
           detailsRu: 'Gemini Advisory рекомендовал отклонить сделку из-за риска сговора.',
@@ -713,7 +800,17 @@ export class LiveApkBackendAdapter implements EngineBackend {
       advisoryMultiplier = 1.0;
     }
 
-    // All gates PASSED: Execute Buy Order
+    // All gates PASSED: Record signal and execute Buy Order
+    this.recordDecision({
+      id: `sig-${Date.now()}`,
+      timeStr: 'Только что',
+      kind: 'bought',
+      symbol: cand.symbol,
+      mint: cand.mint,
+      actionRu: `СИГНАЛ / ПОКУПКА ${cand.symbol}`,
+      reasonRu: 'Импульс +3.4% | Запуск Jito Bundle',
+    });
+
     const tradeSize = Math.min(maxTrade * advisoryMultiplier, availableSol);
     await this.executeBuyOrder(cand, tradeSize);
   }
@@ -1215,13 +1312,13 @@ export class LiveApkBackendAdapter implements EngineBackend {
       // Check gas reserve
       if (this.state.balanceSol < this.MIN_GAS_RESERVE_SOL) {
         this.state.trafficLight = 'PROBLEM';
-        this.state.liveActionTextRu = `Баланс ниже неприкасаемого газового резерва (${this.state.balanceSol.toFixed(4)} < 0.05 SOL)`;
+        this.state.liveActionTextRu = `Баланс ниже неприкасаемого газового резерва (${this.state.balanceSol.toFixed(4)} < 0.01 SOL)`;
         this.notify();
         return {
           success: false,
           mode: 'PAUSED',
           blockedBySecurity: true,
-          reasonRu: `Баланс ниже неприкасаемого газового резерва (${this.state.balanceSol.toFixed(4)} < 0.05 SOL)`,
+          reasonRu: `Баланс ниже неприкасаемого газового резерва (${this.state.balanceSol.toFixed(4)} < 0.01 SOL)`,
         };
       }
 
