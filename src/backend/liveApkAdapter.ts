@@ -37,7 +37,7 @@ import {
   HandsOffAuditReport,
 } from '../types/backend';
 import { EngineBackend } from './engineContract';
-import { SigningAdapter, createSigningAdapter } from '../signing/signingAdapter';
+import { SigningAdapter, RealSolanaSigningAdapter, createSigningAdapter } from '../signing/signingAdapter';
 import { KeepAwakeAdapter, createKeepAwakeAdapter } from '../keepAwakeAdapter';
 import { defaultMicroLiveSupervisor, MicroLiveSupervisor } from './microLiveSupervisor';
 import { defaultScalingAndAuditManager, ScalingAndAuditManager } from './scalingAndAuditManager';
@@ -99,7 +99,7 @@ export class LiveApkBackendAdapter implements EngineBackend {
 
   constructor(signingAdapter?: SigningAdapter, keepAwakeAdapter?: KeepAwakeAdapter) {
     this.signingAdapter = signingAdapter || createSigningAdapter();
-    if (this.signingAdapter.constructor.name !== 'RealSolanaSigningAdapter') {
+    if (!(this.signingAdapter instanceof RealSolanaSigningAdapter)) {
       throw new Error('LIVE INVARIANT VIOLATION: LiveApkBackendAdapter strictly requires RealSolanaSigningAdapter. Mocks are forbidden in live path.');
     }
     this.keepAwakeAdapter = keepAwakeAdapter || createKeepAwakeAdapter();
@@ -113,25 +113,26 @@ export class LiveApkBackendAdapter implements EngineBackend {
       presetVersion: 'v3.2-live',
     };
 
-    const hasHwKey = this.signingAdapter.isCapable();
+    const realAdapter = this.signingAdapter as RealSolanaSigningAdapter;
+    const hasKey = realAdapter.hasKey();
 
     this.state = {
-      trafficLight: hasHwKey ? 'TUNING' : 'PROBLEM',
+      trafficLight: hasKey ? 'TUNING' : 'PROBLEM',
       mode: 'PAUSED',
       autopilotArmed: false,
-      liveActionTextRu: hasHwKey 
+      liveActionTextRu: hasKey 
         ? 'Боевой узел готов к запуску на телефоне. Ожидание команды оператора.'
-        : '🔒 Боевой режим заблокирован: веб-превью не имеет доступа к аппаратному Keystore.',
+        : '🔒 Ключ не введён. Откройте НАСТРОЙКИ и введите сид-фразу для активации торговли.',
       balanceSol: 0,
       earnedTodaySol: 0,
       earnedTodayPct: 0,
       activePosition: null,
       healthIndicators: {
-        blockchainConnection: hasHwKey ? 'green' : 'red',
-        executionSpeed: hasHwKey ? 'green' : 'red',
+        blockchainConnection: 'green',
+        executionSpeed: 'green',
         hourlyErrorsCount: 0,
         systemResourcesPct: 12,
-        needsOperatorHelp: !hasHwKey,
+        needsOperatorHelp: !hasKey,
       },
       pnlHistory: [0],
       decisions: [],
@@ -164,7 +165,7 @@ export class LiveApkBackendAdapter implements EngineBackend {
         { id: '7', titleRu: '7. Бюджет комиссий Jito и сети установлен', passed: true, explanationRu: 'Дневной лимит 0.03 SOL, плавающий смарт-кап активен.' },
         { id: '8', titleRu: '8. Аварийный выключатель (Kill-Switch) доступен', passed: true, explanationRu: 'Мгновенная остановка проверена.' },
         { id: '9', titleRu: '9. Keep-Awake стек готов (Служба, Doze, Watchdog)', passed: this.keepAwakeAdapter.getStatus().watchdogAlive, explanationRu: 'Фоновая служба и сторожевой пес активны.' },
-        { id: '10', titleRu: '10. Торговый seed в нативном Keystore (в браузере MOCK)', passed: hasHwKey, explanationRu: hasHwKey ? 'Аппаратный Keystore подтвержден' : 'В веб-превью аппаратный Keystore недоступен (только в APK на телефоне).' },
+        { id: '10', titleRu: '10. Торговый seed в нативном Keystore', passed: hasKey, explanationRu: hasKey ? 'Аппаратный Keystore подтвержден' : 'Ключ не введён в Keystore. Импортируйте сид-фразу в Настройках.' },
         { id: '11', titleRu: '11. Зафиксирована стабильная базовая версия параметров', passed: true, explanationRu: 'Базовый пресет v3.2-live зафиксирован.' },
       ],
       invariants: [
@@ -241,22 +242,22 @@ export class LiveApkBackendAdapter implements EngineBackend {
       closedDeals: [],
       keepAwake: this.keepAwakeAdapter.getStatus(),
       backendType: 'live_apk',
-      isLiveConnected: hasHwKey,
+      isLiveConnected: hasKey,
       lastSyncTs: Date.now(),
-      needsYou: hasHwKey ? null : {
+      needsYou: hasKey ? null : {
         id: 'need-apk-key',
-        titleRu: 'Требуется запуск на реальном телефоне',
-        descriptionRu: 'Для реальной торговли реальными SOL приложение должно быть установлено как APK на телефон, где есть аппаратный модуль Keystore и биометрия.',
+        titleRu: 'Требуется ввод сид-фразы',
+        descriptionRu: 'Для реальной торговли реальными SOL импортируйте сид-фразу кошелька в разделе НАСТРОЙКИ.',
         severity: 'CRITICAL',
-        optionsRu: [{ action: 'switch_sim', labelRu: 'Переключиться в Симуляцию' }],
+        optionsRu: [{ action: 'dismiss', labelRu: 'Понятно' }],
       },
-      requestInboxCount: hasHwKey ? 0 : 1,
-      requestInboxList: hasHwKey ? [] : [{
+      requestInboxCount: hasKey ? 0 : 1,
+      requestInboxList: hasKey ? [] : [{
         id: 'need-apk-key',
-        titleRu: 'Требуется запуск на реальном телефоне',
-        descriptionRu: 'Для реальной торговли реальными SOL приложение должно быть установлено как APK на телефон, где есть аппаратный модуль Keystore и биометрия.',
+        titleRu: 'Требуется ввод сид-фразы',
+        descriptionRu: 'Для реальной торговли реальными SOL импортируйте сид-фразу кошелька в разделе НАСТРОЙКИ.',
         severity: 'CRITICAL',
-        optionsRu: [{ action: 'switch_sim', labelRu: 'Переключиться в Симуляцию' }],
+        optionsRu: [{ action: 'dismiss', labelRu: 'Понятно' }],
       }],
       vitalSigns: this.vitalSignsMonitor.getStatus(0, 0.002, 0.0008),
       activeCandidatePreset: null,
@@ -427,8 +428,12 @@ export class LiveApkBackendAdapter implements EngineBackend {
 
   public async syncRealAccount(): Promise<void> {
     try {
+      const realAdapter = this.signingAdapter as RealSolanaSigningAdapter;
+      await realAdapter.loadFromKeystore();
+      const hasKey = realAdapter.hasKey();
       const pubkeyStr = await this.signingAdapter.getPublicAddress().catch(() => null);
-      if (pubkeyStr) {
+
+      if (pubkeyStr && hasKey) {
         this.state.wallets.hotWalletPubkey = pubkeyStr;
         try {
           const conn = new Connection(this.solanaRpcUrl, 'confirmed');
@@ -437,6 +442,7 @@ export class LiveApkBackendAdapter implements EngineBackend {
           this.state.balanceSol = balance;
           this.state.wallets.balanceSol = balance;
           this.state.healthIndicators.blockchainConnection = 'green';
+          this.state.healthIndicators.needsOperatorHelp = false;
           this.microLiveSupervisor.setKeySelection(
             this.state.microLive.activeKeyType,
             pubkeyStr,
@@ -452,10 +458,28 @@ export class LiveApkBackendAdapter implements EngineBackend {
               chk.explanationRu = 'Аппаратный ключ верифицирован в Keystore';
             }
           });
+
+          if (this.state.trafficLight === 'PROBLEM' && balance >= 0.05) {
+            this.state.trafficLight = 'TUNING';
+          }
+          if (this.state.liveActionTextRu.includes('Ключ не введён')) {
+            this.state.liveActionTextRu = 'Боевой узел готов к запуску на телефоне. Ожидание команды оператора.';
+          }
         } catch {
-          // Сетевая ошибка (429 / CORS / таймаут) - статус желтый/красный без краша
           this.state.healthIndicators.blockchainConnection = 'yellow';
         }
+        this.notify();
+      } else {
+        this.state.trafficLight = 'PROBLEM';
+        this.state.mode = 'PAUSED';
+        this.state.liveActionTextRu = '🔒 Ключ не введён. Откройте НАСТРОЙКИ и введите сид-фразу для активации торговли.';
+        this.state.healthIndicators.needsOperatorHelp = true;
+        this.state.preflightChecklist.forEach((chk) => {
+          if (chk.id === '10') {
+            chk.passed = false;
+            chk.explanationRu = 'Ключ не введён в Keystore. Импортируйте сид-фразу в Настройках.';
+          }
+        });
         this.notify();
       }
     } catch {

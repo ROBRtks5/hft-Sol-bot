@@ -1,6 +1,6 @@
 import { OperatingMode } from '../types/backend';
 import { SecureStorage } from '../secureStorage';
-import { Connection, PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL } from '@solana/web3.js';
+import { Connection, PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL, Keypair } from '@solana/web3.js';
 import nacl from 'tweetnacl';
 import bs58 from 'bs58';
 
@@ -12,10 +12,46 @@ export interface SigningAdapter {
   signTransaction(rawPayload: Uint8Array): Promise<{ signature: string }>;
   signAndSendSweep(amountSol: number, destinationPubkey: string): Promise<{ success: boolean; txSignature?: string; errorRu?: string }>;
   signAndSendModeSwitch(targetMode: OperatingMode): Promise<{ success: boolean; signature?: string; errorRu?: string }>;
+  hasKey?(): boolean;
+  loadFromKeystore?(): Promise<boolean>;
+  setKeypair?(keypair: Keypair): void;
 }
 
 export class RealSolanaSigningAdapter implements SigningAdapter {
   private rpcUrl = 'https://api.mainnet-beta.solana.com';
+  private isKeyLoaded: boolean = false;
+  public publicKey: string | null = null;
+
+  constructor() {
+    this.loadFromKeystore().catch(() => {});
+  }
+
+  public hasKey(): boolean {
+    return this.isKeyLoaded;
+  }
+
+  public async loadFromKeystore(): Promise<boolean> {
+    try {
+      const keypair = await SecureStorage.getKeypair();
+      if (keypair) {
+        this.isKeyLoaded = true;
+        this.publicKey = keypair.publicKey.toBase58();
+        return true;
+      }
+    } catch (err) {
+      console.warn('[SigningAdapter] Не удалось загрузить ключ из Keystore:', err);
+    }
+    this.isKeyLoaded = false;
+    this.publicKey = null;
+    return false;
+  }
+
+  public setKeypair(keypair: Keypair): void {
+    if (keypair && keypair.publicKey) {
+      this.isKeyLoaded = true;
+      this.publicKey = keypair.publicKey.toBase58();
+    }
+  }
 
   public isCapable(): boolean { return true; }
 
@@ -28,13 +64,19 @@ export class RealSolanaSigningAdapter implements SigningAdapter {
   }
 
   public async getPublicAddress(): Promise<string | null> {
+    if (this.publicKey) return this.publicKey;
+    const loaded = await this.loadFromKeystore();
+    if (loaded && this.publicKey) return this.publicKey;
     return await SecureStorage.derivePublicAddress();
   }
 
   public async signTransaction(rawPayload: Uint8Array): Promise<{ signature: string }> {
+    if (!this.isKeyLoaded) {
+      await this.loadFromKeystore();
+    }
     const keypair = await SecureStorage.getKeypair();
-    if (!keypair) {
-      throw new Error('ОШИБКА ПОДПИСИ: Торговый ключ не найден в Keystore. Импортируйте сид-фразу.');
+    if (!keypair || !this.isKeyLoaded) {
+      throw new Error('Ключ не импортирован в Keystore. Импортируйте сид-фразу в Настройках.');
     }
     const authOk = await SecureStorage.authenticateBiometrics('Подтвердите сделку отпечатком пальца / PIN');
     if (!authOk) {
@@ -46,7 +88,7 @@ export class RealSolanaSigningAdapter implements SigningAdapter {
 
   public async signAndSendSweep(amountSol: number, destinationPubkeyStr: string): Promise<{ success: boolean; txSignature?: string; errorRu?: string }> {
     const keypair = await SecureStorage.getKeypair();
-    if (!keypair) {
+    if (!keypair || !this.isKeyLoaded) {
       return { success: false, errorRu: 'ОШИБКА ВЫВОДА: Торговый ключ отсутствует в защищенном Keystore. Введите сид-фразу.' };
     }
     let destinationPubkey: PublicKey;
@@ -77,7 +119,7 @@ export class RealSolanaSigningAdapter implements SigningAdapter {
   }
 
   public async signAndSendModeSwitch(targetMode: OperatingMode): Promise<{ success: boolean; signature?: string; errorRu?: string }> {
-    const hasKey = await SecureStorage.hasStoredSeed();
+    const hasKey = this.isKeyLoaded || (await SecureStorage.hasStoredSeed());
     if (targetMode === 'MICRO_LIVE' && !hasKey) {
       return { success: false, errorRu: 'Переход в Боевой-микро заблокирован: отсутствует подтвержденный торговый ключ в Keystore.' };
     }
@@ -89,6 +131,6 @@ export class RealSolanaSigningAdapter implements SigningAdapter {
   }
 }
 
-export function createSigningAdapter(): SigningAdapter {
+export function createSigningAdapter(): RealSolanaSigningAdapter {
   return new RealSolanaSigningAdapter();
 }

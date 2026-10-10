@@ -1,7 +1,7 @@
 import { EngineBackend } from './engineContract';
 import { SimulatorBackendAdapter } from './simulatorAdapter';
 import { LiveApkBackendAdapter } from './liveApkAdapter';
-import { createSigningAdapter } from '../signing/signingAdapter';
+import { RealSolanaSigningAdapter, createSigningAdapter } from '../signing/signingAdapter';
 import { createKeepAwakeAdapter } from '../keepAwakeAdapter';
 import { EngineStateV2 } from '../types/backend';
 
@@ -24,7 +24,7 @@ class EngineProxy implements EngineBackend {
   private activeUnsub: (() => void) | null = null;
 
   constructor() {
-    const signing = createSigningAdapter();
+    const signing = new RealSolanaSigningAdapter();
     const keepAwake = createKeepAwakeAdapter();
     this.simulator = new SimulatorBackendAdapter(signing, keepAwake);
     this.liveApk = new LiveApkBackendAdapter(signing, keepAwake);

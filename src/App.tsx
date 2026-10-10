@@ -159,6 +159,10 @@ export default function App() {
       triggerToast('Торговый ключ успешно импортирован в Keystore');
       setIsImportModalOpen(false);
       setSeedInput('');
+      const signing = EngineBackend.getSigningAdapter();
+      if (signing && signing.loadFromKeystore) {
+        await signing.loadFromKeystore();
+      }
       await refreshWalletMeta();
       if (EngineBackend.syncRealAccount) {
         await EngineBackend.syncRealAccount();
@@ -176,6 +180,10 @@ export default function App() {
     const ok = await SecureStorage.clearSeed();
     if (ok) {
       triggerToast('Ключ удален из памяти устройства');
+      const signing = EngineBackend.getSigningAdapter();
+      if (signing && signing.loadFromKeystore) {
+        await signing.loadFromKeystore();
+      }
       await refreshWalletMeta();
       if (EngineBackend.syncRealAccount) {
         await EngineBackend.syncRealAccount();
