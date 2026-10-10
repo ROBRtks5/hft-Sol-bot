@@ -24,6 +24,10 @@ export interface PriceTick {
   slot?: number;
 }
 
+export function isBigIntType(val: unknown): boolean {
+  return typeof val === 'bigint';
+}
+
 export class CircularTickBuffer {
   private readonly capacity: number;
   private ticks: PriceTick[] = [];
@@ -84,9 +88,10 @@ export class CircularTickBuffer {
       baseTick = this.ticks[0];
     }
 
-    if (!baseTick || baseTick.priceSol <= 0) return 0;
+    if (!baseTick || baseTick.priceSol <= 0 || !now || now.priceSol <= 0) return 0;
 
     const dP = ((now.priceSol - baseTick.priceSol) / baseTick.priceSol) * 100;
+    if (isNaN(dP) || !isFinite(dP)) return 0;
     return Number(dP.toFixed(3));
   }
 
@@ -141,17 +146,17 @@ export class CircularTickBuffer {
     const { ofiSol } = this.calculateOFI(5000);
 
     // Gate requirements: dP/dt > 1.8% over 500ms AND OFI > 0
-    if (dp500ms <= 1.8) {
+    if (isNaN(dp500ms) || !isFinite(dp500ms) || dp500ms <= 1.8) {
       return {
         isSignalValid: false,
-        dp500ms,
-        dp2000ms,
-        ofi5s: ofiSol,
-        reasonRu: `dP/dt 500мс (${dp500ms.toFixed(2)}%) ниже порога импульса (1.80%)`,
+        dp500ms: isNaN(dp500ms) ? 0 : dp500ms,
+        dp2000ms: isNaN(dp2000ms) ? 0 : dp2000ms,
+        ofi5s: isNaN(ofiSol) ? 0 : ofiSol,
+        reasonRu: `dP/dt 500мс (${isNaN(dp500ms) ? '0' : dp500ms.toFixed(2)}%) ниже порога импульса (1.80%)`,
       };
     }
 
-    if (ofiSol <= 0) {
+    if (isNaN(ofiSol) || !isFinite(ofiSol) || ofiSol <= 0) {
       return {
         isSignalValid: false,
         dp500ms,

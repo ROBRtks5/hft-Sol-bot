@@ -23,7 +23,9 @@ export class RealSolanaSigningAdapter implements SigningAdapter {
   public publicKey: string | null = null;
 
   constructor() {
-    this.loadFromKeystore().catch(() => {});
+    this.loadFromKeystore().catch((err) => {
+      console.error('[RealSolanaSigningAdapter] Key restoration error:', err);
+    });
   }
 
   public hasKey(): boolean {
@@ -119,9 +121,11 @@ export class RealSolanaSigningAdapter implements SigningAdapter {
   }
 
   public async signAndSendModeSwitch(targetMode: OperatingMode): Promise<{ success: boolean; signature?: string; errorRu?: string }> {
-    const hasKey = this.isKeyLoaded || (await SecureStorage.hasStoredSeed());
-    if (targetMode === 'MICRO_LIVE' && !hasKey) {
-      return { success: false, errorRu: 'Переход в Боевой-микро заблокирован: отсутствует подтвержденный торговый ключ в Keystore.' };
+    if (!this.isKeyLoaded) {
+      await this.loadFromKeystore();
+    }
+    if (targetMode === 'MICRO_LIVE' && !this.isKeyLoaded) {
+      return { success: false, errorRu: 'Торговый ключ не импортирован в Keystore' };
     }
     const authOk = await SecureStorage.authenticateBiometrics('Подтвердите смену режима на ' + targetMode);
     if (!authOk) {

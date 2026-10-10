@@ -85,6 +85,11 @@ export class YellowstoneGrpcAdapter {
   private handleMessage(dataStr: string) {
     try {
       const msg = JSON.parse(dataStr);
+      if (msg.error) {
+        console.error('[Yellowstone WS]: Получена ошибка от RPC/gRPC:', msg.error);
+        this.notifyStatus('RECONNECTING');
+        return;
+      }
       if (msg.method !== 'logsNotification' || !msg.params?.result?.value) return;
       const logs = msg.params.result.value.logs as string[];
       const signature = msg.params.result.value.signature as string;

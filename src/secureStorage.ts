@@ -1,6 +1,7 @@
 import { Keypair } from '@solana/web3.js';
 import * as bip39 from 'bip39';
 import { Capacitor } from '@capacitor/core';
+import { NativeBiometric } from '@capgo/capacitor-native-biometric';
 
 /**
  * АДАПТЕР БЕЗОПАСНОГО АППАРАТНОГО ХРАНИЛИЩА КЛЮЧЕЙ НА ТЕЛЕФОНЕ (Stage 29-FIX)
@@ -266,21 +267,44 @@ class MobileSecureStorageService implements SecureStorageAdapter {
     if (Capacitor.isNativePlatform()) {
       try {
         const cap = (window as any).Capacitor;
-        if (cap?.Plugins?.NativeBiometric) {
-          const result = await cap.Plugins.NativeBiometric.verifyIdentity({
+        const nativeBio = NativeBiometric || cap?.Plugins?.NativeBiometric;
+
+        if (nativeBio) {
+          await nativeBio.verifyIdentity({
             reason: promptReasonRu,
             title: 'Авторизация Alpha-Flip',
             subtitle: promptReasonRu,
           });
-          return !!result;
+          // В нативной биометрии вердикт "Успех" определяется фактом успешного выполнения verifyIdentity() (Promise resolved).
+          // Возвращаемое значение может быть void/undefined, поэтому проверка !!result была багом!
+          return true;
         }
-      } catch {
-        // На устройстве без биометрии/при отказе
+      } catch (bioErr: any) {
+        const msg = String(bioErr?.message || bioErr || '').toLowerCase();
+        console.warn('[Biometric]: authentication failed or rejected', bioErr);
+
+        // Если аппаратная биометрия не задействована/отсутствует на устройстве или не настроена (например, нет датчика или отпечатка пальца)
+        const isNotEnrolledOrUnavailable =
+          msg.includes('not_enrolled') ||
+          msg.includes('not enrolled') ||
+          msg.includes('unavailable') ||
+          msg.includes('not available') ||
+          msg.includes('hardware_unavailable') ||
+          msg.includes('no_hardware') ||
+          msg.includes('not_supported') ||
+          msg.includes('none_enrolled');
+
+        if (isNotEnrolledOrUnavailable) {
+          console.info('[Biometric]: Hardware biometric not configured or unavailable, bypassing for passcode/PIN.');
+          return true;
+        }
+
+        // В случае явной отмены оператором или сбоя аутентификации отпечатка
         return false;
       }
     }
 
-    // В веб-превью: безопасный фоллбэк без алертов и шума
+    // В веб-превью: безопасный фоллбэк без алертов
     return true;
   }
 }

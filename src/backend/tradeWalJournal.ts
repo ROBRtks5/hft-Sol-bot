@@ -99,8 +99,15 @@ export class TradeWalJournal {
         req.onsuccess = () => resolve();
         req.onerror = () => reject(req.error);
       });
-    } catch {
-      // Fallback kept in RAM if IndexedDB encounters sandbox limits
+    } catch (err: any) {
+      const isQuotaError =
+        err instanceof DOMException ||
+        (err && typeof err === 'object' && 'name' in err && err.name === 'QuotaExceededError');
+      if (isQuotaError) {
+        console.warn('[TradeWalJournal] IndexedDB QuotaExceededError/DOMException encounter, using RAM fallback');
+      } else {
+        console.warn('[TradeWalJournal] IndexedDB write error:', err?.message || err);
+      }
     }
   }
 

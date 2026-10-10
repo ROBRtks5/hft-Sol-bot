@@ -56,6 +56,13 @@ export class OnChainScamFilter {
    * Record a transaction for cluster analysis
    */
   public recordBuy(mint: string, tx: SlotTransactionRecord): void {
+    if (this.recentBuysByMint.size > 200 && !this.recentBuysByMint.has(mint)) {
+      const oldestKey = this.recentBuysByMint.keys().next().value;
+      if (oldestKey) {
+        this.recentBuysByMint.delete(oldestKey);
+      }
+    }
+
     let list = this.recentBuysByMint.get(mint);
     if (!list) {
       list = [];
@@ -72,6 +79,15 @@ export class OnChainScamFilter {
    * 1. Validate on-chain metadata and authorities
    */
   public evaluateMetadata(meta: TokenOnChainMeta): FilterResult {
+    const isValidMeta = !!(meta && typeof meta === 'object' && (meta.mint || (meta as any).name || meta.creatorHoldingPct !== undefined));
+    if (!isValidMeta) {
+      return {
+        passed: false,
+        code: 'SCAM_AUTHORITY',
+        rejectReasonRu: 'Некорректная метаинформация токена',
+        detailsRu: 'Метаданные токена отсутствуют или не соответствуют требуемой структуре.',
+      };
+    }
     // 1a. Mint / Freeze Authority check
     if (meta.mintAuthority !== null && meta.mintAuthority !== undefined && meta.mintAuthority !== '') {
       return {
@@ -205,7 +221,7 @@ export class OnChainScamFilter {
     const totalLossPct = Number((entryImpact + exitImpact + dexFeePct + jitoTipPct + slippagePct).toFixed(2));
     const thresholdPct = 4.5;
 
-    const passed = totalLossPct <= thresholdPct;
+    const passed = !isNaN(totalLossPct) && isFinite(totalLossPct) && totalLossPct <= thresholdPct;
 
     return {
       passed,

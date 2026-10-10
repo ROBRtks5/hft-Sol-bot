@@ -135,7 +135,7 @@ export class GeminiAdvisoryService {
         };
       } catch (err: any) {
         console.warn('[Gemini Advisory]: Ошибка запроса к ИИ, фоллбэк на нейтральный коэффициент:', err?.message);
-        return this.getNeutralFallback('ИИ временно недоступен. Хот-патч ведет сделку по локальным инвариантам.');
+        return this.getNeutralFallback('[GEMINI DEGRADED] Не удалось получить совет: ' + (err?.message || 'неизвестная ошибка'));
       }
     })();
 

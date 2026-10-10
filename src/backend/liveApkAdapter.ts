@@ -89,6 +89,7 @@ export class LiveApkBackendAdapter implements EngineBackend {
   private isExecutingTrade = false;
   private isExiting = false;
   private autonomousLoopTimer: any = null;
+  private initSyncTimer: any = null;
   private negativeOfiSeconds = 0;
   private trailingStopFloor = 0;
   private readonly MIN_GAS_RESERVE_SOL = 0.05;
@@ -282,7 +283,7 @@ export class LiveApkBackendAdapter implements EngineBackend {
       handsOffAudit: defaultHandsOffAuditManager.getHandsOffAuditReport(),
     };
 
-    setTimeout(() => {
+    this.initSyncTimer = setTimeout(() => {
       this.syncRealAccount();
     }, 50);
   }
@@ -613,6 +614,13 @@ export class LiveApkBackendAdapter implements EngineBackend {
     }
 
     // 3. Momentum & Order Flow Imbalance (Ported from momentum.rs)
+    if (this.tickBuffers.size > 100 && !this.tickBuffers.has(cand.mint)) {
+      const oldestKey = this.tickBuffers.keys().next().value;
+      if (oldestKey) {
+        this.tickBuffers.delete(oldestKey);
+      }
+    }
+
     let tickBuf = this.tickBuffers.get(cand.mint);
     if (!tickBuf) {
       tickBuf = new CircularTickBuffer(100);
@@ -791,6 +799,12 @@ export class LiveApkBackendAdapter implements EngineBackend {
       };
       this.state.activeTransactions = [trackingRecord, ...this.state.activeTransactions.slice(0, 9)];
 
+      // Verify mode hasn't changed to KILLED/PAUSED during in-flight Jito bundle dispatch
+      if (this.state.mode !== 'MICRO_LIVE') {
+        console.warn('[LiveApk] Mode switched during buy order execution. Aborting activePosition creation.');
+        return;
+      }
+
       // Initialize Active Position in RAM
       const entryPrice = cand.priceSol || 0.00000003;
       this.state.activePosition = {
@@ -860,6 +874,10 @@ export class LiveApkBackendAdapter implements EngineBackend {
   }
 
   private stopAutonomousLoop() {
+    if (this.initSyncTimer) {
+      clearTimeout(this.initSyncTimer);
+      this.initSyncTimer = null;
+    }
     if (this.autonomousLoopTimer) {
       clearInterval(this.autonomousLoopTimer);
       this.autonomousLoopTimer = null;
@@ -884,12 +902,9 @@ export class LiveApkBackendAdapter implements EngineBackend {
         }
       }
 
-      // If buffer is not yet populated with new live ticks, simulate slight price drift or use real ticks
-      if (pos.currentPriceSol && pos.entryPriceSol) {
+      // Real price percentage tracking from live ticks
+      if (pos.currentPriceSol && pos.entryPriceSol && pos.entryPriceSol > 0) {
         pos.currentPercent = Number((((pos.currentPriceSol - pos.entryPriceSol) / pos.entryPriceSol) * 100).toFixed(1));
-      } else {
-        const stepPct = (Math.random() - 0.42) * 2.4;
-        pos.currentPercent = Number((pos.currentPercent + stepPct).toFixed(1));
       }
 
       // Track Peak Price Percent for trailing
@@ -912,15 +927,19 @@ export class LiveApkBackendAdapter implements EngineBackend {
 
       // Tier 1: при росте +30% продать 50% купленных токенов через Jito-бандл
       if (currentPct >= 30 && !pos.tier1Closed) {
-        pos.tier1Closed = true;
-        await this.executePartialExitOrder(50, `Тейк-профит Tier 1 (+${currentPct}%): продажа 50% позиции через Jito`);
+        const closedOk = await this.executePartialExitOrder(50, `Тейк-профит Tier 1 (+${currentPct}%): продажа 50% позиции через Jito`);
+        if (closedOk) {
+          pos.tier1Closed = true;
+        }
         return;
       }
 
       // Tier 2: при росте +60% продать 30% купленных токенов (остается 20%)
       if (currentPct >= 60 && !pos.tier2Closed) {
-        pos.tier2Closed = true;
-        await this.executePartialExitOrder(30, `Тейк-профит Tier 2 (+${currentPct}%): продажа 30% позиции через Jito`);
+        const closedOk = await this.executePartialExitOrder(30, `Тейк-профит Tier 2 (+${currentPct}%): продажа 30% позиции через Jito`);
+        if (closedOk) {
+          pos.tier2Closed = true;
+        }
         return;
       }
 
@@ -965,8 +984,8 @@ export class LiveApkBackendAdapter implements EngineBackend {
   /**
    * Execute partial exit via Jito MEV bundle (TP Ladder)
    */
-  private async executePartialExitOrder(sellSharePct: number, reason: string) {
-    if (this.isExiting || !this.state.activePosition) return;
+  private async executePartialExitOrder(sellSharePct: number, reason: string): Promise<boolean> {
+    if (this.isExiting || !this.state.activePosition) return false;
     this.isExiting = true;
 
     try {
@@ -1037,8 +1056,10 @@ export class LiveApkBackendAdapter implements EngineBackend {
       }).catch(() => {});
 
       this.notify();
+      return true;
     } catch (err: any) {
       console.warn('[LiveApk] Partial exit order error:', err?.message);
+      return false;
     } finally {
       this.isExiting = false;
     }

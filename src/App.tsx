@@ -46,9 +46,17 @@ export default function App() {
 
   // Subscribe to engine state
   useEffect(() => {
+    let lastClosedCount = -1;
+    let lastDecisionsCount = -1;
     const unsub = EngineBackend.subscribe((newState) => {
       setEngine(newState);
-      refreshWalFeed();
+      const currentClosedCount = newState.closedDeals ? newState.closedDeals.length : 0;
+      const currentDecisionsCount = newState.decisions ? newState.decisions.length : 0;
+      if (currentClosedCount !== lastClosedCount || currentDecisionsCount !== lastDecisionsCount) {
+        lastClosedCount = currentClosedCount;
+        lastDecisionsCount = currentDecisionsCount;
+        refreshWalFeed();
+      }
     });
     refreshWalFeed();
     return () => unsub();
@@ -237,11 +245,11 @@ export default function App() {
   // Status computation
   const isTrading = engine.mode === 'MICRO_LIVE';
   const isKilled = engine.mode === 'KILLED';
-  const isError = isKilled || engine.trafficLight === 'PROBLEM';
-  const isPaused = engine.mode === 'PAUSED';
+  const isError = hasStoredKey && (isKilled || engine.trafficLight === 'PROBLEM');
+  const isPaused = !hasStoredKey || engine.mode === 'PAUSED' || !isTrading;
 
-  // Live Risk parameters from engine
-  const currentMaxTradeSol = engine.microLive?.maxTradeSol ?? 0.01;
+  // Live Risk parameters from engine (defaults: 0.02 SOL, 0.10 SOL, 3)
+  const currentMaxTradeSol = engine.microLive?.maxTradeSol ?? 0.02;
   const currentMaxDailyLossSol = engine.microLive?.maxDailyLossSol ?? 0.10;
   const currentMaxConsecutiveLosses = engine.microLive?.maxConsecutiveLosses ?? 3;
 
@@ -251,43 +259,65 @@ export default function App() {
   let statusTextColor = 'text-amber-400';
   let statusBgCard = 'bg-[#151a22] border-slate-700/60';
 
+  // Header status indicator synchronization
+  let headerDotColor = 'bg-amber-400';
+  let headerStatusText = 'PAUSED';
+
   if (isTrading) {
     statusLabel = 'ТОРГУЕТ';
     statusBadgeColor = 'bg-emerald-400 animate-pulse';
     statusTextColor = 'text-emerald-400';
     statusBgCard = 'bg-[#0f1f18] border-emerald-500/40 shadow-[0_0_20px_rgba(16,185,129,0.1)]';
-  } else if (isError) {
+    headerDotColor = 'bg-emerald-400 animate-pulse';
+    headerStatusText = 'LIVE';
+  } else if (isKilled || (isError && hasStoredKey)) {
     statusLabel = 'ОШИБКА';
     statusReason = isKilled ? 'Аварийная остановка' : (engine.liveActionTextRu || 'Сбой подсистемы');
     statusBadgeColor = 'bg-rose-500';
     statusTextColor = 'text-rose-400';
     statusBgCard = 'bg-[#221014] border-rose-500/40';
-  } else if (isPaused) {
+    headerDotColor = 'bg-rose-500';
+    headerStatusText = isKilled ? 'KILLED' : 'ERROR';
+  } else if (!hasStoredKey) {
     statusLabel = 'НА ПАУЗЕ';
-    statusReason = !hasStoredKey 
-      ? 'Ключ не введён' 
-      : ((engine.balanceSol || 0) < 0.01 
-        ? 'Требуется пополнение SOL' 
-        : (engine.liveActionTextRu || 'Ожидание запуска'));
+    statusReason = 'Ожидание ключа';
     statusBadgeColor = 'bg-amber-400';
     statusTextColor = 'text-amber-400';
     statusBgCard = 'bg-[#151a22] border-slate-700/60';
+    headerDotColor = 'bg-amber-400';
+    headerStatusText = 'PAUSED';
+  } else if (isPaused) {
+    statusLabel = 'НА ПАУЗЕ';
+    statusReason = (engine.balanceSol || 0) < 0.05 
+      ? 'Требуется пополнение SOL' 
+      : (engine.liveActionTextRu || 'Ожидание запуска');
+    statusBadgeColor = 'bg-amber-400';
+    statusTextColor = 'text-amber-400';
+    statusBgCard = 'bg-[#151a22] border-slate-700/60';
+    headerDotColor = 'bg-amber-400';
+    headerStatusText = 'PAUSED';
   } else {
     statusLabel = 'ОСТАНОВЛЕНО';
     statusReason = 'Движок выключен';
     statusBadgeColor = 'bg-slate-500';
     statusTextColor = 'text-slate-400';
     statusBgCard = 'bg-[#12161c] border-slate-800';
+    headerDotColor = 'bg-slate-500';
+    headerStatusText = 'STOPPED';
   }
 
   // Consistent Scenario & Action lines
-  const scenarioTitle = engine.activePosition
-    ? `СОПРОВОЖДЕНИЕ ПОЗИЦИИ / ${engine.activePosition.symbol}`
-    : 'ПОИСК ИМПУЛЬСА / PUMP.FUN';
+  const scenarioTitle = !hasStoredKey
+    ? 'ОЖИДАНИЕ ИНИЦИАЛИЗАЦИИ / КОШЕЛЕК НЕ ПОДКЛЮЧЕН'
+    : (engine.activePosition
+      ? `СОПРОВОЖДЕНИЕ ПОЗИЦИИ / ${engine.activePosition.symbol}`
+      : 'ПОИСК ИМПУЛЬСА / PUMP.FUN');
 
-  const actionText = engine.activePosition
-    ? `В позиции: ${engine.activePosition.symbol}, вход ${engine.activePosition.entrySol} SOL, сейчас ${engine.activePosition.currentPercent >= 0 ? '+' : ''}${engine.activePosition.currentPercent}%`
-    : (engine.liveActionTextRu || 'Поиск импульса в bonding curve...');
+  const actionText = !hasStoredKey
+    ? '🔒 Откройте НАСТРОЙКИ и введите сид-фразу для активации торговли'
+    : (engine.activePosition
+      ? `В позиции: ${engine.activePosition.symbol}, вход ${engine.activePosition.entrySol} SOL, сейчас ${engine.activePosition.currentPercent >= 0 ? '+' : ''}${engine.activePosition.currentPercent}%`
+      : (engine.liveActionTextRu || 'Поиск импульса в bonding curve...'));
 
   // Honest Money Metrics (from IndexedDB WAL and Engine state)
   const hasDeals = walTrades.length > 0 || (engine.closedDeals && engine.closedDeals.length > 0) || (engine.decisions && engine.decisions.length > 0);
@@ -324,14 +354,17 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#090d10] text-slate-100 font-sans flex flex-col justify-between max-w-md mx-auto relative select-none border-x border-[#1a232d] shadow-2xl">
       {/* Top Header */}
-      <header className="px-5 pt-5 pb-3 border-b border-[#16202a] flex items-center justify-between">
+      <header 
+        className="px-5 pb-3 border-b border-[#16202a] flex items-center justify-between"
+        style={{ paddingTop: 'max(env(safe-area-inset-top, 0px), 16px)' }}
+      >
         <h1 className="text-base font-bold tracking-wider text-slate-200">
           Alpha-Flip <span className="text-xs text-emerald-400 font-mono font-semibold">v3.2</span>
         </h1>
         <div className="flex items-center space-x-2">
-          <div className={`w-2 h-2 rounded-full ${statusBadgeColor}`} />
+          <div className={`w-2 h-2 rounded-full ${headerDotColor}`} />
           <span className="text-xs text-slate-400 font-mono">
-            {isTrading ? 'LIVE' : isKilled ? 'KILLED' : isPaused ? 'PAUSED' : 'STOPPED'}
+            {headerStatusText}
           </span>
         </div>
       </header>
@@ -651,19 +684,22 @@ export default function App() {
                 <div className="flex justify-between items-center text-slate-300">
                   <span>• Размер сделки:</span>
                   <div className="flex items-center space-x-1">
-                    {[0.01, 0.02, 0.05].map((val) => (
-                      <button
-                        key={val}
-                        onClick={() => handleSetRiskLimit('maxTradeSol', val)}
-                        className={`px-2 py-0.5 rounded text-[11px] cursor-pointer transition-all border ${
-                          currentMaxTradeSol === val
-                            ? 'bg-emerald-600 text-white border-emerald-500 font-bold'
-                            : 'bg-[#1a232d] text-slate-400 border-slate-700 hover:text-slate-200'
-                        }`}
-                      >
-                        {val} SOL
-                      </button>
-                    ))}
+                    {[0.01, 0.02, 0.05].map((val) => {
+                      const isActive = Math.abs(currentMaxTradeSol - val) < 0.005;
+                      return (
+                        <button
+                          key={val}
+                          onClick={() => handleSetRiskLimit('maxTradeSol', val)}
+                          className={`px-2 py-0.5 rounded text-[11px] cursor-pointer transition-all border ${
+                            isActive
+                              ? 'bg-emerald-600 text-white border-emerald-500 font-bold'
+                              : 'bg-[#1a232d] text-slate-400 border-slate-700 hover:text-slate-200'
+                          }`}
+                        >
+                          {val} SOL
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
 
@@ -671,19 +707,22 @@ export default function App() {
                 <div className="flex justify-between items-center text-slate-300">
                   <span>• Дневной стоп:</span>
                   <div className="flex items-center space-x-1">
-                    {[0.05, 0.10, 0.20].map((val) => (
-                      <button
-                        key={val}
-                        onClick={() => handleSetRiskLimit('maxDailyLossSol', val)}
-                        className={`px-2 py-0.5 rounded text-[11px] cursor-pointer transition-all border ${
-                          currentMaxDailyLossSol === val
-                            ? 'bg-emerald-600 text-white border-emerald-500 font-bold'
-                            : 'bg-[#1a232d] text-slate-400 border-slate-700 hover:text-slate-200'
-                        }`}
-                      >
-                        {val.toFixed(2)} SOL
-                      </button>
-                    ))}
+                    {[0.05, 0.10, 0.20].map((val) => {
+                      const isActive = Math.abs(currentMaxDailyLossSol - val) < 0.005;
+                      return (
+                        <button
+                          key={val}
+                          onClick={() => handleSetRiskLimit('maxDailyLossSol', val)}
+                          className={`px-2 py-0.5 rounded text-[11px] cursor-pointer transition-all border ${
+                            isActive
+                              ? 'bg-emerald-600 text-white border-emerald-500 font-bold'
+                              : 'bg-[#1a232d] text-slate-400 border-slate-700 hover:text-slate-200'
+                          }`}
+                        >
+                          {val.toFixed(2)} SOL
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
 
@@ -691,19 +730,22 @@ export default function App() {
                 <div className="flex justify-between items-center text-slate-300">
                   <span>• Серия убытков:</span>
                   <div className="flex items-center space-x-1">
-                    {[2, 3, 5].map((val) => (
-                      <button
-                        key={val}
-                        onClick={() => handleSetRiskLimit('maxConsecutiveLosses', val)}
-                        className={`px-2.5 py-0.5 rounded text-[11px] cursor-pointer transition-all border ${
-                          currentMaxConsecutiveLosses === val
-                            ? 'bg-emerald-600 text-white border-emerald-500 font-bold'
-                            : 'bg-[#1a232d] text-slate-400 border-slate-700 hover:text-slate-200'
-                        }`}
-                      >
-                        {val}
-                      </button>
-                    ))}
+                    {[2, 3, 5].map((val) => {
+                      const isActive = currentMaxConsecutiveLosses === val;
+                      return (
+                        <button
+                          key={val}
+                          onClick={() => handleSetRiskLimit('maxConsecutiveLosses', val)}
+                          className={`px-2.5 py-0.5 rounded text-[11px] cursor-pointer transition-all border ${
+                            isActive
+                              ? 'bg-emerald-600 text-white border-emerald-500 font-bold'
+                              : 'bg-[#1a232d] text-slate-400 border-slate-700 hover:text-slate-200'
+                          }`}
+                        >
+                          {val}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               </div>

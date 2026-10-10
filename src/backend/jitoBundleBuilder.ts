@@ -177,13 +177,18 @@ export class JitoBundleBuilder {
       });
 
       if (!response.ok) {
-        return { bundleId, status: 'Pending' };
+        return { bundleId, status: 'Failed' };
       }
 
       const json = await response.json();
+      if (json.error) {
+        console.error('[JitoBundleBuilder] RPC response error:', json.error);
+        return { bundleId, status: 'Failed' };
+      }
+
       const bundleValue = json.result?.value?.[0];
       if (!bundleValue) {
-        return { bundleId, status: 'Pending' };
+        return { bundleId, status: 'Failed' };
       }
 
       const confirmationStatus = bundleValue.confirmation_status;

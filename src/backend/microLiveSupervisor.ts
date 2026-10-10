@@ -70,6 +70,20 @@ export class MicroLiveSupervisor {
     return this.getState();
   }
 
+  public checkInvariants(pnlInput?: any): { safeToTrade: boolean; reasonRu?: string } {
+    const pnl = Number(pnlInput) || 0;
+    if (isNaN(pnl)) {
+      return { safeToTrade: false, reasonRu: 'Недопустимое числовое значение PnL' };
+    }
+    if (this.state.consecutiveLosses >= this.state.maxConsecutiveLosses) {
+      return { safeToTrade: false, reasonRu: `Достигнут лимит убыточных сделок подряд (${this.state.consecutiveLosses}/${this.state.maxConsecutiveLosses})` };
+    }
+    if (this.state.dailyLossSol >= this.state.maxDailyLossSol) {
+      return { safeToTrade: false, reasonRu: `Достигнут дневной лимит убытка (${this.state.dailyLossSol.toFixed(4)} SOL)` };
+    }
+    return { safeToTrade: true };
+  }
+
   public setRiskLimits(limits: { maxTradeSol?: number; maxDailyLossSol?: number; maxConsecutiveLosses?: number }): MicroLiveSupervisorState {
     if (typeof limits.maxTradeSol === 'number') {
       this.state.maxTradeSol = limits.maxTradeSol;
