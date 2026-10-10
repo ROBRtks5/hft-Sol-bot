@@ -460,7 +460,7 @@ export class LiveApkBackendAdapter implements EngineBackend {
             }
           });
 
-          if (this.state.trafficLight === 'PROBLEM' && balance >= 0.05) {
+          if (this.state.trafficLight === 'PROBLEM') {
             this.state.trafficLight = 'TUNING';
           }
           if (this.state.liveActionTextRu.includes('Ключ не введён')) {

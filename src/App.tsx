@@ -245,8 +245,7 @@ export default function App() {
   // Status computation
   const isTrading = engine.mode === 'MICRO_LIVE';
   const isKilled = engine.mode === 'KILLED';
-  const isError = hasStoredKey && (isKilled || engine.trafficLight === 'PROBLEM');
-  const isPaused = !hasStoredKey || engine.mode === 'PAUSED' || !isTrading;
+  const isRealError = isKilled || (hasStoredKey && engine.healthIndicators?.blockchainConnection === 'red');
 
   // Live Risk parameters from engine (defaults: 0.02 SOL, 0.10 SOL, 3)
   const currentMaxTradeSol = engine.microLive?.maxTradeSol ?? 0.02;
@@ -270,15 +269,33 @@ export default function App() {
     statusBgCard = 'bg-[#0f1f18] border-emerald-500/40 shadow-[0_0_20px_rgba(16,185,129,0.1)]';
     headerDotColor = 'bg-emerald-400 animate-pulse';
     headerStatusText = 'LIVE';
-  } else if (isKilled || (isError && hasStoredKey)) {
+  } else if (isKilled) {
     statusLabel = 'ОШИБКА';
-    statusReason = isKilled ? 'Аварийная остановка' : (engine.liveActionTextRu || 'Сбой подсистемы');
+    statusReason = 'Аварийная остановка';
     statusBadgeColor = 'bg-rose-500';
     statusTextColor = 'text-rose-400';
     statusBgCard = 'bg-[#221014] border-rose-500/40';
     headerDotColor = 'bg-rose-500';
-    headerStatusText = isKilled ? 'KILLED' : 'ERROR';
-  } else if (!hasStoredKey) {
+    headerStatusText = 'KILLED';
+  } else if (isRealError) {
+    statusLabel = 'ОШИБКА';
+    statusReason = engine.liveActionTextRu || 'Сбой соединения RPC';
+    statusBadgeColor = 'bg-rose-500';
+    statusTextColor = 'text-rose-400';
+    statusBgCard = 'bg-[#221014] border-rose-500/40';
+    headerDotColor = 'bg-rose-500';
+    headerStatusText = 'ERROR';
+  } else if (hasStoredKey) {
+    statusLabel = 'ГОТОВ К ЗАПУСКУ';
+    statusReason = (engine.balanceSol || 0) < 0.05 
+      ? 'Ожидание пополнения (мин. 0.05 SOL)' 
+      : 'Подключен';
+    statusBadgeColor = 'bg-emerald-400';
+    statusTextColor = 'text-emerald-400';
+    statusBgCard = 'bg-[#0f1d17] border-emerald-600/40 shadow-[0_0_15px_rgba(16,185,129,0.08)]';
+    headerDotColor = 'bg-emerald-400';
+    headerStatusText = 'READY';
+  } else {
     statusLabel = 'НА ПАУЗЕ';
     statusReason = 'Ожидание ключа';
     statusBadgeColor = 'bg-amber-400';
@@ -286,24 +303,6 @@ export default function App() {
     statusBgCard = 'bg-[#151a22] border-slate-700/60';
     headerDotColor = 'bg-amber-400';
     headerStatusText = 'PAUSED';
-  } else if (isPaused) {
-    statusLabel = 'НА ПАУЗЕ';
-    statusReason = (engine.balanceSol || 0) < 0.05 
-      ? 'Требуется пополнение SOL' 
-      : (engine.liveActionTextRu || 'Ожидание запуска');
-    statusBadgeColor = 'bg-amber-400';
-    statusTextColor = 'text-amber-400';
-    statusBgCard = 'bg-[#151a22] border-slate-700/60';
-    headerDotColor = 'bg-amber-400';
-    headerStatusText = 'PAUSED';
-  } else {
-    statusLabel = 'ОСТАНОВЛЕНО';
-    statusReason = 'Движок выключен';
-    statusBadgeColor = 'bg-slate-500';
-    statusTextColor = 'text-slate-400';
-    statusBgCard = 'bg-[#12161c] border-slate-800';
-    headerDotColor = 'bg-slate-500';
-    headerStatusText = 'STOPPED';
   }
 
   // Consistent Scenario & Action lines

@@ -1,5 +1,6 @@
 import { Keypair } from '@solana/web3.js';
 import * as bip39 from 'bip39';
+import { derivePath } from 'ed25519-hd-key';
 import { Capacitor } from '@capacitor/core';
 import { NativeBiometric } from '@capgo/capacitor-native-biometric';
 
@@ -139,6 +140,20 @@ class MobileSecureStorageService implements SecureStorageAdapter {
     return { valid: true, wordCount: words.length };
   }
 
+  /**
+   * Стандартная деривация ключа Solana BIP-44 / SLIP-0010 (Phantom / Solflare):
+   * Путь деривации: "m/44'/501'/0'/0'"
+   */
+  private async deriveKeypairFromMnemonic(mnemonic: string): Promise<Keypair> {
+    const cleanedMnemonic = mnemonic.trim().toLowerCase().replace(/\s+/g, ' ');
+    const seedBuffer = await bip39.mnemonicToSeed(cleanedMnemonic);
+    const seedHex = Array.from(new Uint8Array(seedBuffer))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+    const derived = derivePath("m/44'/501'/0'/0'", seedHex);
+    return Keypair.fromSeed(derived.key);
+  }
+
   public async storeSeed(mnemonic: string): Promise<{ success: boolean; errorRu?: string }> {
     const validation = this.validateMnemonicPhrase(mnemonic);
     if (!validation.valid) {
@@ -152,10 +167,7 @@ class MobileSecureStorageService implements SecureStorageAdapter {
 
     try {
       const cleanedMnemonic = mnemonic.trim().toLowerCase().replace(/\s+/g, ' ');
-      const seed = await bip39.mnemonicToSeed(cleanedMnemonic);
-      // Берём первые 32 байта для Solana Ed25519 Keypair
-      const seed32 = seed.subarray(0, 32);
-      const kp = Keypair.fromSeed(seed32);
+      const kp = await this.deriveKeypairFromMnemonic(cleanedMnemonic);
 
       // Шифрование AES-256-GCM
       const salt = window.crypto.getRandomValues(new Uint8Array(16));
@@ -216,9 +228,7 @@ class MobileSecureStorageService implements SecureStorageAdapter {
       );
 
       const decryptedMnemonic = new TextDecoder().decode(decryptedBuffer);
-      const seed = await bip39.mnemonicToSeed(decryptedMnemonic);
-      const seed32 = seed.subarray(0, 32);
-      const kp = Keypair.fromSeed(seed32);
+      const kp = await this.deriveKeypairFromMnemonic(decryptedMnemonic);
 
       this.cachedKeypair = kp;
       return kp;
