@@ -9,9 +9,48 @@
     <meta property="og:description" content="High-frequency Solana memecoin momentum flip engine with two-contour Rust hot path and Python cold advisory path." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      window.global = window;
+      window.process = window.process || { env: {} };
+    </script>
   </head>
-  <body>
+  <body class="bg-[#090d10] text-slate-100">
     <div id="root"></div>
+    <div id="emergency-error-overlay" style="display:none; position:fixed; inset:0; z-index:999999; background:#0f0507; color:#f87171; padding:20px; font-family:monospace; overflow:auto; box-sizing:border-box;">
+      <h2 style="font-size:16px; font-weight:bold; color:#ef4444; margin-bottom:10px; border-bottom:1px solid #7f1d1d; padding-bottom:8px;">
+        ⚠️ АВАРИЙНЫЙ СБОЙ ПРИ ЗАПУСКЕ (FATAL BOOT ERROR)
+      </h2>
+      <p style="font-size:12px; color:#fca5a5; margin-bottom:12px;">
+        Обнаружена необработанная ошибка во время работы приложения в WebView/браузере:
+      </p>
+      <pre id="emergency-error-text" style="background:#1a0a0d; padding:12px; border-radius:8px; border:1px solid #991b1b; font-size:11px; white-space:pre-wrap; word-break:break-all; color:#fecaca;"></pre>
+      <button onclick="window.location.reload()" style="margin-top:16px; width:100%; padding:12px; background:#dc2626; color:#ffffff; font-weight:bold; border:none; border-radius:8px; cursor:pointer;">
+        ПЕРЕЗАПУСТИТЬ ПРИЛОЖЕНИЕ
+      </button>
+    </div>
+    <script>
+      (function() {
+        function showEmergencyError(msg, stack) {
+          var overlay = document.getElementById('emergency-error-overlay');
+          var textEl = document.getElementById('emergency-error-text');
+          if (overlay && textEl) {
+            textEl.innerText = (msg || 'Неизвестная ошибка') + (stack ? '\n\nСтек вызова:\n' + stack : '');
+            overlay.style.display = 'block';
+          }
+        }
+        window.onerror = function(message, source, lineno, colno, error) {
+          var details = message + ' (' + source + ':' + lineno + ':' + colno + ')';
+          showEmergencyError(details, error && error.stack);
+          return false;
+        };
+        window.addEventListener('unhandledrejection', function(event) {
+          var reason = event.reason;
+          var msg = reason ? (reason.message || String(reason)) : 'Unhandled Rejection';
+          var stack = reason && reason.stack ? reason.stack : '';
+          showEmergencyError('Unhandled Promise Rejection: ' + msg, stack);
+        });
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
