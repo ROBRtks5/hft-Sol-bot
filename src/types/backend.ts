@@ -55,6 +55,17 @@ export interface MarketCandidate {
   trendScore: number;
   oneLineReasonRu: string;
   liquiditySol: number;
+  priceSol?: number;
+  solReserve?: number;
+  tokenReserve?: number;
+  lastVolumeBuySol?: number;
+  lastVolumeSellSol?: number;
+  slot?: number;
+  mintAuthority?: string | null;
+  freezeAuthority?: string | null;
+  isToken2022?: boolean;
+  hasTransferHook?: boolean;
+  creatorHoldingPct?: number;
 }
 
 export interface SmartWalletItem {
@@ -332,10 +343,18 @@ export interface EngineStateV2 {
   earnedTodayPct: number;
   activePosition: {
     symbol: string;
+    mint?: string;
     entrySol: number;
     currentPercent: number;
     holdTimeSec: number;
     stopLossPercent: number;
+    entryPriceSol?: number;
+    currentPriceSol?: number;
+    lastOfiSol?: number;
+    peakPercent?: number;
+    remainingTokensPct?: number; // 100% initially, reduces after Tier 1 (50%) and Tier 2 (20% left)
+    tier1Closed?: boolean; // +30% -> sell 50%
+    tier2Closed?: boolean; // +60% -> sell 30%
   } | null;
   healthIndicators: HealthIndicators;
   pnlHistory: number[];

@@ -1,7 +1,7 @@
 import { OperatingMode } from '../types/backend';
 import { SecureStorage } from '../secureStorage';
 import { Connection, PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL } from '@solana/web3.js';
-import { sign } from 'tweetnacl';
+import nacl from 'tweetnacl';
 import bs58 from 'bs58';
 
 export interface SigningAdapter {
@@ -40,7 +40,7 @@ export class RealSolanaSigningAdapter implements SigningAdapter {
     if (!authOk) {
       throw new Error('Биометрическая аутентификация отклонена оператором.');
     }
-    const signatureBytes = sign.detached(rawPayload, keypair.secretKey);
+    const signatureBytes = nacl.sign.detached(rawPayload, keypair.secretKey);
     return { signature: bs58.encode(signatureBytes) };
   }
 

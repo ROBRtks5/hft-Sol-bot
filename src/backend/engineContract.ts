@@ -57,6 +57,8 @@ export interface EngineBackend {
   getBackendType(): 'simulator' | 'live_apk';
   getSigningAdapter(): SigningAdapter;
   getKeepAwakeAdapter(): KeepAwakeAdapter;
+  syncRealAccount?(): Promise<void>;
+  setRiskLimits?(limits: { maxTradeSol?: number; maxDailyLossSol?: number; maxConsecutiveLosses?: number }): Promise<void>;
 
   // Методы чтения (Read-Only)
   getStatus(): Promise<TrafficLightStatus>;

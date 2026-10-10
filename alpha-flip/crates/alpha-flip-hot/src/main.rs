@@ -1,10 +1,13 @@
 use alpha_flip_hot::config::{AppConfig, TradingMode};
-use alpha_flip_hot::execution::MockJitoClient;
+use alpha_flip_hot::execution::{JitoClient, MockJitoClient, ProductionJitoClient};
 use alpha_flip_hot::exit::SyntheticOrderEngine;
 use alpha_flip_hot::orchestrator::{
     EngineEvent, OperatingMode, OrchestratorEngine, OrchestratorEventLoop, RiskLimits,
 };
-use alpha_flip_hot::position::{MockBalanceProvider, PositionJournal, PositionManager, ReconciliationStatus};
+use alpha_flip_hot::position::{
+    BalanceProvider, MockBalanceProvider, PositionJournal, PositionManager,
+    ProductionRpcBalanceProvider, ReconciliationStatus,
+};
 use alpha_flip_hot::types::{Lamports, Slot};
 use anyhow::Result;
 use std::env;
@@ -147,7 +150,20 @@ async fn main() -> Result<()> {
     let orchestrator_engine = OrchestratorEngine::new(target_mode, position_manager, risk_limits);
 
     // 7. Initialize Execution Layer & Synthetic Exit Engine
-    let jito_client = Arc::new(MockJitoClient::new());
+    // MOCK IS STRICTLY UNREACHABLE IN LIVE MODE
+    let jito_client: Arc<dyn JitoClient> = match target_mode {
+        OperatingMode::Live => {
+            info!("🔒 LIVE MODE: Initializing Production Jito Client for {}", config.jito.block_engine_url);
+            Arc::new(ProductionJitoClient::new(
+                config.jito.block_engine_url.clone(),
+                None,
+            ))
+        }
+        _ => {
+            info!("🛠️ SAFE/OFFLINE MODE: Initializing Mock Jito Client");
+            Arc::new(MockJitoClient::new())
+        }
+    };
     let exit_engine = SyntheticOrderEngine::new(jito_client);
 
     let (mut event_loop, event_sender) = OrchestratorEventLoop::new(
@@ -157,13 +173,21 @@ async fn main() -> Result<()> {
     );
 
     // 8. Run Startup Recovery & Reconciliation
+    // MOCK IS STRICTLY UNREACHABLE IN LIVE MODE
     info!("Performing Startup Balance Reconciliation...");
-    let balance_provider = MockBalanceProvider::new(Lamports::new(10_000_000_000));
-    let startup_slot: Slot = 250_000_000;
-    
-    let recovery_status = event_loop
-        .run_startup_recovery(&balance_provider, startup_slot)
-        .await?;
+    let recovery_status = match target_mode {
+        OperatingMode::Live => {
+            let balance_provider = ProductionRpcBalanceProvider::new(
+                config.grpc.endpoint.clone(),
+                config.wallet.sweep_address.clone().unwrap_or_default(),
+            );
+            event_loop.run_startup_recovery(&balance_provider, 0).await?
+        }
+        _ => {
+            let balance_provider = MockBalanceProvider::new(Lamports::new(10_000_000_000));
+            event_loop.run_startup_recovery(&balance_provider, 250_000_000).await?
+        }
+    };
 
     match recovery_status {
         ReconciliationStatus::CleanIdle => {

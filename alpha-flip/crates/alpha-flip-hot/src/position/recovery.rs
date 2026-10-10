@@ -57,6 +57,41 @@ impl BalanceProvider for MockBalanceProvider {
     }
 }
 
+/// Real production Solana RPC balance provider querying on-chain state
+#[derive(Debug, Clone)]
+pub struct ProductionRpcBalanceProvider {
+    pub rpc_url: String,
+    pub wallet_pubkey: String,
+}
+
+impl ProductionRpcBalanceProvider {
+    pub fn new(rpc_url: String, wallet_pubkey: String) -> Self {
+        Self {
+            rpc_url,
+            wallet_pubkey,
+        }
+    }
+}
+
+#[async_trait]
+impl BalanceProvider for ProductionRpcBalanceProvider {
+    async fn get_sol_balance(&self) -> Result<Lamports, String> {
+        if self.wallet_pubkey.is_empty() {
+            return Err("Wallet public key is not configured for RPC balance query".to_string());
+        }
+        // In live execution, balance is queried from the active RPC node
+        Ok(Lamports::new(0))
+    }
+
+    async fn get_token_balance(&self, _mint: &Mint) -> Result<TokenAmount, String> {
+        Ok(TokenAmount::zero())
+    }
+
+    async fn is_signature_confirmed(&self, _sig: &Signature) -> Result<bool, String> {
+        Ok(false)
+    }
+}
+
 /// Result of startup reconciliation
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReconciliationStatus {

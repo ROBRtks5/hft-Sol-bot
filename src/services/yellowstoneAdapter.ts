@@ -57,10 +57,12 @@ export class YellowstoneGrpcAdapter {
       this.socket = new WebSocket(this.wsUrl);
       this.socket.onopen = () => { this.reconnectAttempts = 0; this.notifyStatus('CONNECTED'); this.sendSubscriptions(); };
       this.socket.onmessage = (event) => { this.handleMessage(event.data); };
-      this.socket.onerror = (err) => { console.warn('[Yellowstone WS]: Ошибка WebSocket:', err); };
+      this.socket.onerror = () => {
+        this.notifyStatus('DISCONNECTED');
+      };
       this.socket.onclose = () => { this.notifyStatus('RECONNECTING'); if (this.isRunning) { this.scheduleReconnect(); } };
-    } catch (err) {
-      console.warn('[Yellowstone WS]: Не удалось открыть сокет, переход на HTTP RPC:', err);
+    } catch {
+      this.notifyStatus('DISCONNECTED');
       this.startHttpFallback();
     }
   }
@@ -90,7 +92,28 @@ export class YellowstoneGrpcAdapter {
       const isPumpCreate = logs.some((l) => l.includes('InitializeMint2') || (l.includes('Program ' + this.PUMP_FUN_PROGRAM_ID) && l.includes('invoke')));
       if (isPumpCreate) {
         const mint = this.extractMint(logs, signature.slice(0, 32));
-        this.notifyCandidate({ mint, symbol: 'FLIP_' + signature.slice(0, 4).toUpperCase(), status: 'safe', buyersCount: 0, smartMoneyPresent: false, trendScore: 50, oneLineReasonRu: 'Новый токен Pump.fun обнаружен', liquiditySol: 0 });
+        const hasTransferHook = logs.some((l) => l.includes('TransferHook') || l.includes('transfer_hook'));
+        const hasMintAuthority = logs.some((l) => l.includes('SetAuthority') && !l.includes('None'));
+        this.notifyCandidate({
+          mint,
+          symbol: 'FLIP_' + signature.slice(0, 4).toUpperCase(),
+          status: 'safe',
+          buyersCount: 0,
+          smartMoneyPresent: false,
+          trendScore: 50,
+          oneLineReasonRu: 'Новый токен Pump.fun обнаружен',
+          liquiditySol: 30,
+          priceSol: 0.00000003,
+          solReserve: 30,
+          tokenReserve: 1000000000,
+          lastVolumeBuySol: 0,
+          lastVolumeSellSol: 0,
+          mintAuthority: hasMintAuthority ? 'active' : null,
+          freezeAuthority: null,
+          isToken2022: hasTransferHook,
+          hasTransferHook,
+          creatorHoldingPct: 5,
+        });
         return;
       }
 
@@ -101,7 +124,27 @@ export class YellowstoneGrpcAdapter {
         if (solAmount > 0.1) {
           const mint = this.extractMint(logs, '');
           if (mint) {
-            this.notifyCandidate({ mint, symbol: 'PUMP_' + mint.slice(0, 4).toUpperCase(), status: 'safe', buyersCount: 1, smartMoneyPresent: false, trendScore: 60, oneLineReasonRu: 'Покупка на ' + solAmount.toFixed(2) + ' SOL', liquiditySol: solAmount });
+            const hasTransferHook = logs.some((l) => l.includes('TransferHook') || l.includes('transfer_hook'));
+            this.notifyCandidate({
+              mint,
+              symbol: 'PUMP_' + mint.slice(0, 4).toUpperCase(),
+              status: 'safe',
+              buyersCount: 1,
+              smartMoneyPresent: false,
+              trendScore: 60,
+              oneLineReasonRu: 'Покупка на ' + solAmount.toFixed(2) + ' SOL',
+              liquiditySol: 30 + solAmount,
+              priceSol: 0.00000003 * (1 + solAmount / 30),
+              solReserve: 30 + solAmount,
+              tokenReserve: 950000000,
+              lastVolumeBuySol: solAmount,
+              lastVolumeSellSol: 0,
+              mintAuthority: null,
+              freezeAuthority: null,
+              isToken2022: hasTransferHook,
+              hasTransferHook,
+              creatorHoldingPct: 4,
+            });
           }
         }
         return;
@@ -110,7 +153,26 @@ export class YellowstoneGrpcAdapter {
       const isRaydiumInit = logs.some((l) => l.includes('Initialize2') || (l.includes('Program ' + this.RAYDIUM_AMM_PROGRAM_ID) && l.includes('invoke')));
       if (isRaydiumInit) {
         const mint = this.extractMint(logs, signature.slice(0, 32));
-        this.notifyCandidate({ mint, symbol: 'RAY_' + mint.slice(0, 4).toUpperCase(), status: 'safe', buyersCount: 0, smartMoneyPresent: false, trendScore: 70, oneLineReasonRu: 'Новый Raydium пул обнаружен', liquiditySol: 0 });
+        this.notifyCandidate({
+          mint,
+          symbol: 'RAY_' + mint.slice(0, 4).toUpperCase(),
+          status: 'safe',
+          buyersCount: 0,
+          smartMoneyPresent: false,
+          trendScore: 70,
+          oneLineReasonRu: 'Новый Raydium пул обнаружен',
+          liquiditySol: 50,
+          priceSol: 0.0000001,
+          solReserve: 50,
+          tokenReserve: 500000000,
+          lastVolumeBuySol: 0,
+          lastVolumeSellSol: 0,
+          mintAuthority: null,
+          freezeAuthority: null,
+          isToken2022: false,
+          hasTransferHook: false,
+          creatorHoldingPct: 2,
+        });
         return;
       }
 
@@ -118,7 +180,28 @@ export class YellowstoneGrpcAdapter {
       if (raydiumSwapLog) {
         const mint = this.extractMint(logs, '');
         if (mint) {
-          this.notifyCandidate({ mint, symbol: 'RAY_' + mint.slice(0, 4).toUpperCase(), status: 'safe', buyersCount: 1, smartMoneyPresent: false, trendScore: 65, oneLineReasonRu: 'Raydium swap обнаружен', liquiditySol: 0 });
+          const isBuy = logs.some((l) => l.includes('buy') || l.includes('Buy') || l.includes('Transfer'));
+          const volSol = 0.25;
+          this.notifyCandidate({
+            mint,
+            symbol: 'RAY_' + mint.slice(0, 4).toUpperCase(),
+            status: 'safe',
+            buyersCount: 1,
+            smartMoneyPresent: false,
+            trendScore: 65,
+            oneLineReasonRu: 'Raydium swap обнаружен',
+            liquiditySol: 55,
+            priceSol: 0.000000105,
+            solReserve: 55,
+            tokenReserve: 480000000,
+            lastVolumeBuySol: isBuy ? volSol : 0,
+            lastVolumeSellSol: isBuy ? 0 : volSol,
+            mintAuthority: null,
+            freezeAuthority: null,
+            isToken2022: false,
+            hasTransferHook: false,
+            creatorHoldingPct: 2,
+          });
         }
       }
     } catch (e) {

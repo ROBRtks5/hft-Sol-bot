@@ -12,6 +12,8 @@ import { GoogleGenAI, Type, Schema } from '@google/genai';
 
 export interface AdvisoryAnalysisRequest {
   tokenSymbol: string;
+  tokenName?: string;
+  description?: string;
   mintAddress: string;
   liquiditySol: number;
   volume5mSol: number;
@@ -21,6 +23,8 @@ export interface AdvisoryAnalysisRequest {
 
 export interface AdvisoryAnalysisResponse {
   multiplier: number; // 0.8x - 1.2x
+  narrativeScore?: number; // 0 - 100
+  trendClassification?: string;
   cabalRiskPct: number; // 0 - 100
   recommendation: 'BUY' | 'SKIP' | 'WATCH';
   reasoningRu: string;
@@ -32,6 +36,14 @@ const advisoryResponseSchema: Schema = {
     multiplier: {
       type: Type.NUMBER,
       description: 'Множитель доверия нарративу от 0.8 до 1.2',
+    },
+    narrativeScore: {
+      type: Type.NUMBER,
+      description: 'Оценка силы нарратива от 0 до 100',
+    },
+    trendClassification: {
+      type: Type.STRING,
+      description: 'Классификация тренда: AI_MEME, ANIMAL, CULT, DEGEN, UNKNOWN',
     },
     cabalRiskPct: {
       type: Type.NUMBER,
@@ -54,7 +66,10 @@ export class GeminiAdvisoryService {
   private ai: GoogleGenAI | null = null;
 
   constructor() {
-    const apiKey = import.meta.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY || '';
+    const apiKey =
+      import.meta.env?.VITE_GEMINI_API_KEY ||
+      (typeof process !== 'undefined' ? process.env?.GEMINI_API_KEY : '') ||
+      '';
     if (apiKey) {
       try {
         this.ai = new GoogleGenAI({ apiKey });
@@ -69,47 +84,62 @@ export class GeminiAdvisoryService {
       return this.getNeutralFallback('ИИ недоступен (API ключ не задан). Хот-патч торгует по жёстким правилам Solana.');
     }
 
-    try {
-      const prompt = `Проанализируй монету-кандидат на Solana:
-Символ: ${req.tokenSymbol}
+    // 1.5s non-blocking race timeout: never stall tick processing
+    const timeoutPromise = new Promise<AdvisoryAnalysisResponse>((resolve) => {
+      setTimeout(() => {
+        resolve(this.getNeutralFallback('Таймаут ответа Gemini (>1.5 сек). Применен нейтральный множитель 1.0x без задержки тиков.'));
+      }, 1500);
+    });
+
+    const aiRequestPromise = (async (): Promise<AdvisoryAnalysisResponse> => {
+      try {
+        const prompt = `Проанализируй монету-кандидат на Solana:
+Тикер: ${req.tokenSymbol}
+Имя: ${req.tokenName || req.tokenSymbol}
+Описание: ${req.description || 'Solana momentum memecoin candidate on Pump.fun / Raydium'}
 Минт: ${req.mintAddress}
 Ликвидность: ${req.liquiditySol} SOL
 Объём за 5м: ${req.volume5mSol} SOL
 Прогресс Бондинга: ${req.bondingCurvePct}%
 Умные кошельки: ${req.smartWalletsCount}
 
-Оцени риск кабала и дай рекомендацию в формате JSON.`;
+Оцени силу нарратива, риск кабала и классифицируй тренд. Рассчитай множитель в диапазоне [0.8-1.2]. Верни JSON.`;
 
-      const response = await this.ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: advisoryResponseSchema,
-          temperature: 0.2,
-        },
-      });
+        const response = await this.ai!.models.generateContent({
+          model: 'gemini-2.5-flash',
+          contents: prompt,
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: advisoryResponseSchema,
+            temperature: 0.2,
+          },
+        });
 
-      const text = response.text;
-      if (!text) {
-        return this.getNeutralFallback('ИИ вернул пустой ответ. Применен нейтральный фактор 1.0x.');
+        const text = response.text;
+        if (!text) {
+          return this.getNeutralFallback('ИИ вернул пустой ответ. Применен нейтральный фактор 1.0x.');
+        }
+
+        const parsed = JSON.parse(text);
+        // Ограничиваем мультипликатор жесткими рамками [0.8x - 1.2x]
+        const rawMult = typeof parsed.multiplier === 'number' ? parsed.multiplier : 1.0;
+        const boundedMultiplier = Math.max(0.8, Math.min(1.2, rawMult));
+
+        return {
+          multiplier: boundedMultiplier,
+          narrativeScore: typeof parsed.narrativeScore === 'number' ? Math.max(0, Math.min(100, parsed.narrativeScore)) : 65,
+          trendClassification: parsed.trendClassification || 'DEGEN',
+          cabalRiskPct: Math.max(0, Math.min(100, parsed.cabalRiskPct || 20)),
+          recommendation: parsed.recommendation || 'WATCH',
+          reasoningRu: parsed.reasoningRu || 'ИИ одобрил вход по метрикам объема и нарратива.',
+        };
+      } catch (err: any) {
+        console.warn('[Gemini Advisory]: Ошибка запроса к ИИ, фоллбэк на нейтральный коэффициент:', err?.message);
+        return this.getNeutralFallback('ИИ временно недоступен. Хот-патч ведет сделку по локальным инвариантам.');
       }
+    })();
 
-      const parsed = JSON.parse(text);
-      // Ограничиваем мультипликатор жесткими рамками [0.8x - 1.2x]
-      const rawMult = typeof parsed.multiplier === 'number' ? parsed.multiplier : 1.0;
-      const boundedMultiplier = Math.max(0.8, Math.min(1.2, rawMult));
-
-      return {
-        multiplier: boundedMultiplier,
-        cabalRiskPct: Math.max(0, Math.min(100, parsed.cabalRiskPct || 20)),
-        recommendation: parsed.recommendation || 'WATCH',
-        reasoningRu: parsed.reasoningRu || 'ИИ одобрил вход по метрикам объема и ликвидности.',
-      };
-    } catch (err: any) {
-      console.warn('[Gemini Advisory]: Ошибка запроса к ИИ, фоллбэк на нейтральный коэффициент:', err?.message);
-      return this.getNeutralFallback('ИИ временно недоступен. Хот-патч ведет сделку по локальным инвариантам.');
-    }
+    return Promise.race([aiRequestPromise, timeoutPromise]);
   }
 
   private getNeutralFallback(reasoningRu: string): AdvisoryAnalysisResponse {

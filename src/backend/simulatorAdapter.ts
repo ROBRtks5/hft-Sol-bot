@@ -94,16 +94,10 @@ export class SimulatorBackendAdapter implements EngineBackend {
       mode: 'SIMULATION',
       autopilotArmed: true,
       liveActionTextRu: 'Ищу новые монеты: 4 кандидата в проверке, отсекаю сговор создателей...',
-      balanceSol: 0.2884,
-      earnedTodaySol: 0.0384,
-      earnedTodayPct: 15.4,
-      activePosition: {
-        symbol: 'SOLFLIP',
-        entrySol: 0.02,
-        currentPercent: 7.2,
-        holdTimeSec: 24,
-        stopLossPercent: -3.5,
-      },
+      balanceSol: 0,
+      earnedTodaySol: 0,
+      earnedTodayPct: 0,
+      activePosition: null,
       healthIndicators: {
         blockchainConnection: 'green',
         executionSpeed: 'green',
@@ -111,22 +105,13 @@ export class SimulatorBackendAdapter implements EngineBackend {
         systemResourcesPct: 9,
         needsOperatorHelp: false,
       },
-      pnlHistory: [
-        0, 0.002, 0.0026, 0.0021, 0.005, 0.006, 0.0078, 0.0073, 0.0099, 0.0118, 
-        0.0113, 0.013, 0.0156, 0.017, 0.0165, 0.018, 0.020, 0.0197, 0.0214, 0.0246, 
-        0.0241, 0.0262, 0.0285, 0.0298, 0.0293, 0.031, 0.0325, 0.032, 0.0344, 0.0363, 
-        0.0358, 0.0373, 0.040, 0.0411, 0.0407, 0.0425, 0.0438, 0.0456, 0.047, 0.0465, 
-        0.0485, 0.050
-      ],
-      decisions: SIMULATION_DECISIONS,
+      pnlHistory: [0],
+      decisions: [],
       wallets: {
-        hotWalletPubkey: '7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs',
-        coldVaultPubkey: '9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin',
-        balanceSol: 0.2884,
-        sweepsHistory: [
-          { id: 'sw-1', date: 'Сегодня, 11:20', amountSol: 0.05, target: 'Холодный сейф (9xQe...)' },
-          { id: 'sw-2', date: 'Вчера, 19:40', amountSol: 0.12, target: 'Холодный сейф (9xQe...)' },
-        ],
+        hotWalletPubkey: '',
+        coldVaultPubkey: '',
+        balanceSol: 0,
+        sweepsHistory: [],
       },
       gas: {
         channelMode: 'JITO_PRIVATE',
@@ -230,7 +215,7 @@ export class SimulatorBackendAdapter implements EngineBackend {
       },
       candidates: [
         {
-          mint: '7vfC...voxs',
+          mint: '4kKq...77vX',
           symbol: 'FROGGY',
           status: 'safe',
           buyersCount: 52,
@@ -287,7 +272,7 @@ export class SimulatorBackendAdapter implements EngineBackend {
         },
       ],
       trends: [
-        { keyword: 'AI Agent Solana', confidencePct: 94, spamRiskPct: 8, matchedCoins: ['SOLFLIP', 'AIPUMP'] },
+        { keyword: 'AI Agent Solana', confidencePct: 94, spamRiskPct: 8, matchedCoins: ['NEURAL', 'AIPUMP'] },
         { keyword: 'Cute Mascot Memes', confidencePct: 76, spamRiskPct: 22, matchedCoins: ['FROGGY'] },
         { keyword: 'Burn CTO Breakout', confidencePct: 88, spamRiskPct: 14, matchedCoins: ['MOONCAT'] },
       ],
@@ -605,31 +590,26 @@ export class SimulatorBackendAdapter implements EngineBackend {
   }
 
   /**
-   * ЧЕСТНОЕ ПЕРЕКЛЮЧЕНИЕ РЕЖИМА:
-   * Если оператор запрашивает MICRO_LIVE в веб-превью без аппаратного ключа,
-   * запрос блокируется на уровне контракта с возвратом понятной причины на русском языке.
+   * СТРОГАЯ ИЗОЛЯЦИЯ СИМУЛЯТОРА (STAGE 31 / БЛОК 2):
+   * SimulatorBackendAdapter изолирован исключительно для режима SIMULATION и self-test.
+   * Любая попытка запуска MICRO_LIVE / LIVE через симулятор физически заблокирована.
    */
   public async setMode(mode: OperatingMode): Promise<ModeSwitchResult> {
     if (mode === 'MICRO_LIVE') {
-      if (!this.signingAdapter.isCapable()) {
-        const reason =
-          'Переход в Боевой-микро заблокирован: вы находитесь в веб-превью без аппаратного ключа. В веб-превью разрешена только Симуляция. Реальные сделки запускаются только в APK на телефоне.';
-        return {
-          success: false,
-          mode: 'SIMULATION',
-          blockedBySecurity: true,
-          reasonRu: reason,
-        };
-      }
+      const reason =
+        'ИЗОЛЯЦИЯ МОКОВ: SimulatorBackendAdapter изолирован только для режима SIMULATION и тестов. Боевой режим MICRO_LIVE физически заблокирован в симуляторе. Для реальной торговли переключитесь на LiveApkBackendAdapter с реальным RPC и аппаратным Keystore.';
+      return {
+        success: false,
+        mode: 'SIMULATION',
+        blockedBySecurity: true,
+        reasonRu: reason,
+      };
     }
 
     this.state.mode = mode;
     if (mode === 'SIMULATION') {
       this.state.trafficLight = 'AUTONOMOUS';
       this.state.liveActionTextRu = 'Симуляция запущена: расчет сделок без риска реальных денег.';
-    } else if (mode === 'MICRO_LIVE') {
-      this.state.trafficLight = 'AUTONOMOUS';
-      this.state.liveActionTextRu = 'Боевой-микро запущен: сделки ограничены строгим сайзом 0.02 SOL.';
     } else if (mode === 'PAUSED') {
       this.state.trafficLight = 'STOPPED';
       this.state.liveActionTextRu = 'Робот на паузе: новые покупки заблокированы, открытая сделка под защитой.';
@@ -647,6 +627,14 @@ export class SimulatorBackendAdapter implements EngineBackend {
   }
 
   public async startEngine(mode: OperatingMode = 'SIMULATION'): Promise<ModeSwitchResult> {
+    if (mode === 'MICRO_LIVE') {
+      return {
+        success: false,
+        mode: 'SIMULATION',
+        blockedBySecurity: true,
+        reasonRu: 'ИЗОЛЯЦИЯ МОКОВ: Запуск боевого режима через SimulatorBackendAdapter запрещен. Используйте LiveApkBackendAdapter.',
+      };
+    }
     return await this.setMode(mode);
   }
 
@@ -662,7 +650,7 @@ export class SimulatorBackendAdapter implements EngineBackend {
     this.state.keepAwake.pauseReasonRu = 'Низкий заряд батареи (<15%): пауза новых входов';
     this.state.mode = 'PAUSED';
     this.state.trafficLight = 'PROBLEM';
-    this.state.liveActionTextRu = '⚠️ Батарея <15%: новые покупки на паузе. Открытая сделка SOLFLIP сопровождается стоп-лоссом.';
+    this.state.liveActionTextRu = '⚠️ Батарея <15%: новые покупки на паузе. Открытая сделка сопровождается стоп-лоссом.';
     this.requestInbox.push({
       id: 'stress-battery',
       titleRu: 'Стресс Keep-Awake: Батарея < 15%',
@@ -843,7 +831,7 @@ export class SimulatorBackendAdapter implements EngineBackend {
   public async captureCapsule(windowSec: number = 30): Promise<CapsuleRecord> {
     const record: CapsuleRecord = {
       capsuleId: `cap-${Date.now()}`,
-      titleRu: `Снимок импульса SOLFLIP (${windowSec} сек)`,
+      titleRu: `Снимок импульса (${windowSec} сек)`,
       timestamp: new Date().toLocaleTimeString('ru-RU'),
       framesCount: 48,
       summaryRu: 'Зафиксировано 48 тиков книги заявок и обновлений bonding curve.',

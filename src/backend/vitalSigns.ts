@@ -137,15 +137,11 @@ export class VitalSignsMonitor {
   }
 
   /**
-   * Симуляция дрифта пинга для тестов и демонстрации в UI
+   * Обновление задержки пинга сети без Math.random() (чистый детерминированный учет)
    */
   public simulatePingVariation(targetMs?: number): number {
-    if (typeof targetMs === 'number') {
-      this.lastPingMs = targetMs;
-    } else {
-      // Реалистичные колебания вокруг 60-120мс с редкими всплесками
-      const spike = Math.random() < 0.15 ? 480 : 0;
-      this.lastPingMs = Math.round(55 + Math.random() * 80 + spike);
+    if (typeof targetMs === 'number' && Number.isFinite(targetMs)) {
+      this.lastPingMs = Math.max(1, Math.round(targetMs));
     }
     this.recordNetworkResponse(this.lastPingMs);
     return this.lastPingMs;

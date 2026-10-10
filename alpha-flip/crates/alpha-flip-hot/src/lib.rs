@@ -33,7 +33,7 @@ pub use events::{MarketState, TradeEvent, TradeSide};
 pub use execution::{
     BlockhashCache, BudgetGovernor, BundleBuilder, BundleStatus, CUProfileCache,
     FillStatus, FillTracker, InFlightOrder, JitoBundle, JitoClient, MarketRegime,
-    MockJitoClient, RegionalBlockEngine, SendRouter, TipOptimizer,
+    MockJitoClient, ProductionJitoClient, RegionalBlockEngine, SendRouter, TipOptimizer,
     MAX_BUNDLE_TRANSACTIONS, SOLANA_MAX_PACKET_SIZE,
 };
 pub use observability::{
@@ -51,8 +51,8 @@ pub use orchestrator::{
 };
 pub use position::{
     BalanceProvider, JournalEvent, JournalRecord, MockBalanceProvider, PositionExitState,
-    PositionManager, PositionJournal, PositionState, PositionSummary, ReconciliationStatus,
-    StartupRecoveryEngine,
+    PositionManager, PositionJournal, PositionState, PositionSummary, ProductionRpcBalanceProvider,
+    ReconciliationStatus, StartupRecoveryEngine,
 };
 pub use replay::{ReplayDecisionLog, ReplayFrame, ReplayLoader, ReplayRunner, ReplaySummary};
 pub use shadow::{

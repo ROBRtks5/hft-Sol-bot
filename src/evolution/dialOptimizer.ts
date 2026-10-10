@@ -22,30 +22,29 @@ export function proposeDialsForRegime(
   corridors: RegimeCorridors,
   generationIndex: number
 ): { candidateDials: CandidateDials; version: string; titleRu: string } {
-  // Вычисляем целевые значения в коридоре с легким шагом адаптации
+  // Вычисляем целевые значения в коридоре с детерминированным шагом адаптации
+  const stepMod = (generationIndex % 3 - 1);
   const targetGreed = Math.round(
-    corridors.greed.defaultVal + (Math.random() - 0.45) * 8
+    corridors.greed.defaultVal + stepMod * 2
   );
   const clampedGreed = Math.max(corridors.greed.min, Math.min(corridors.greed.max, targetGreed));
 
   const targetExitSpeed = Math.round(
-    corridors.exitSpeed.defaultVal + (Math.random() - 0.4) * 6
+    corridors.exitSpeed.defaultVal + stepMod * 1.5
   );
   const clampedExitSpeed = Math.max(corridors.exitSpeed.min, Math.min(corridors.exitSpeed.max, targetExitSpeed));
 
   // ЗАЩИТА ПОЛА: scamSuspicion никогда не может быть ниже минимума коридора!
   const targetScam = Math.round(
-    Math.max(corridors.scamSuspicion.min, currentDials.scamSuspicion + (Math.random() - 0.3) * 4)
+    Math.max(corridors.scamSuspicion.min, currentDials.scamSuspicion)
   );
   const clampedScam = Math.max(corridors.scamSuspicion.min, Math.min(corridors.scamSuspicion.max, targetScam));
 
-  const targetTrend = Math.round(
-    corridors.trendTrust.defaultVal + (Math.random() - 0.5) * 10
-  );
+  const targetTrend = Math.round(corridors.trendTrust.defaultVal);
   const clampedTrend = Math.max(corridors.trendTrust.min, Math.min(corridors.trendTrust.max, targetTrend));
 
   const targetTip = Number(
-    (corridors.commissionAggression.defaultVal + (Math.random() - 0.45) * 0.0004).toFixed(4)
+    corridors.commissionAggression.defaultVal.toFixed(4)
   );
   const clampedTip = Math.max(
     corridors.commissionAggression.min,

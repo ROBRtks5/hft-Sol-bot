@@ -1,5 +1,6 @@
 import { KeepAwakeStatus } from './types/backend';
 import { SecureStorage } from './secureStorage';
+import { Capacitor } from '@capacitor/core';
 
 /**
  * KEEP-AWAKE & PHONE-HOST AUTONOMOUS LIFECYCLE ADAPTER (Stage 29-FIX)
@@ -114,13 +115,13 @@ class RealKeepAwakeAdapter implements KeepAwakeAdapter {
       }
     }
 
-    // Запрос Capacitor KeepAwake плагина если присутствует
-    if (typeof window !== 'undefined' && (window as any).Capacitor?.Plugins?.KeepAwake) {
+    // Запрос Capacitor KeepAwake плагина только на нативной платформе
+    if (Capacitor.isNativePlatform() && typeof window !== 'undefined' && (window as any).Capacitor?.Plugins?.KeepAwake) {
       try {
         await (window as any).Capacitor.Plugins.KeepAwake.keepAwake();
         this.wakeLockHeld = true;
-      } catch (e) {
-        console.warn('[KeepAwake Plugin]: Сбой вызова Capacitor:', e);
+      } catch {
+        // Безопасный фоллбэк без шума в консоли
       }
     }
 

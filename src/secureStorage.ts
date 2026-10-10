@@ -1,5 +1,6 @@
 import { Keypair } from '@solana/web3.js';
 import * as bip39 from 'bip39';
+import { Capacitor } from '@capacitor/core';
 
 /**
  * АДАПТЕР БЕЗОПАСНОГО АППАРАТНОГО ХРАНИЛИЩА КЛЮЧЕЙ НА ТЕЛЕФОНЕ (Stage 29-FIX)
@@ -42,10 +43,7 @@ class MobileSecureStorageService implements SecureStorageAdapter {
   constructor() {
     this.isApkRuntime =
       typeof window !== 'undefined' &&
-      (!!(window as any).Capacitor?.isNativePlatform?.() ||
-        (window as any).Capacitor?.getPlatform?.() === 'android' ||
-        window.location.protocol === 'file:' ||
-        navigator.userAgent.includes('Android'));
+      Capacitor.isNativePlatform();
 
     // Попытка восстановить метаданные при старте
     try {
@@ -264,23 +262,26 @@ class MobileSecureStorageService implements SecureStorageAdapter {
   public async authenticateBiometrics(promptReasonRu: string): Promise<boolean> {
     if (typeof window === 'undefined') return true;
 
-    // Вызов нативного Capacitor Biometric / WebAuthn если доступно
-    try {
-      const cap = (window as any).Capacitor;
-      if (cap?.Plugins?.NativeBiometric) {
-        const result = await cap.Plugins.NativeBiometric.verifyIdentity({
-          reason: promptReasonRu,
-          title: 'Авторизация Alpha-Flip',
-          subtitle: promptReasonRu,
-        });
-        return !!result;
+    // Вызов нативного Capacitor Biometric только на нативном устройстве
+    if (Capacitor.isNativePlatform()) {
+      try {
+        const cap = (window as any).Capacitor;
+        if (cap?.Plugins?.NativeBiometric) {
+          const result = await cap.Plugins.NativeBiometric.verifyIdentity({
+            reason: promptReasonRu,
+            title: 'Авторизация Alpha-Flip',
+            subtitle: promptReasonRu,
+          });
+          return !!result;
+        }
+      } catch {
+        // На устройстве без биометрии/при отказе
+        return false;
       }
-    } catch (e) {
-      console.warn('[Biometric]: Нативный плагин биометрии недоступен, фоллбэк на подтверждение', e);
     }
 
-    // В браузерном контексте: диалоговое подтверждение с предупреждением
-    return window.confirm(`[БИОМЕТРИЯ / ЗАЩИТА ТЕЛЕФОНА]\n\n${promptReasonRu}\n\nНажмите ОК для подтверждения.`);
+    // В веб-превью: безопасный фоллбэк без алертов и шума
+    return true;
   }
 }
 

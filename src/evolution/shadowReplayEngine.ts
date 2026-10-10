@@ -174,7 +174,7 @@ export function evaluateCandidateInShadow(
   if (isGreedElevated || isTipElevated || candidateMaxDrawdownPct > baseline.maxDrawdownPct + 0.3) {
     riskChangeRu = 'повышен';
     confirmationTokenNeeded = true;
-    confirmationToken = `EVOLVE-RISK-${Math.round(candidateDials.greed)}-${Math.floor(100 + Math.random() * 900)}`;
+    confirmationToken = `EVOLVE-RISK-${Math.round(candidateDials.greed)}-${(Date.now() % 900) + 100}`;
   } else if (candidateDials.scamSuspicion > corridors.scamSuspicion.defaultVal && candidateDials.greed <= corridors.greed.defaultVal) {
     riskChangeRu = 'понижен';
   }

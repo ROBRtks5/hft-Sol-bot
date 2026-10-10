@@ -28,7 +28,7 @@ class EngineProxy implements EngineBackend {
     const keepAwake = createKeepAwakeAdapter();
     this.simulator = new SimulatorBackendAdapter(signing, keepAwake);
     this.liveApk = new LiveApkBackendAdapter(signing, keepAwake);
-    this.activeBackend = this.simulator;
+    this.activeBackend = this.liveApk;
     this.attachActiveBackend();
   }
 
@@ -73,6 +73,18 @@ class EngineProxy implements EngineBackend {
 
   public getKeepAwakeAdapter() {
     return this.activeBackend.getKeepAwakeAdapter();
+  }
+
+  public async syncRealAccount() {
+    if (this.activeBackend.syncRealAccount) {
+      await this.activeBackend.syncRealAccount();
+    }
+  }
+
+  public async setRiskLimits(limits: { maxTradeSol?: number; maxDailyLossSol?: number; maxConsecutiveLosses?: number }) {
+    if (this.activeBackend.setRiskLimits) {
+      await this.activeBackend.setRiskLimits(limits);
+    }
   }
 
   public getStatus() {
@@ -152,6 +164,10 @@ class EngineProxy implements EngineBackend {
   }
 
   public startEngine(mode?: any) {
+    if (mode === 'MICRO_LIVE' || mode === 'LIVE') {
+      this.switchToLiveApk();
+      return this.liveApk.startEngine(mode);
+    }
     return this.activeBackend.startEngine(mode);
   }
 
@@ -164,6 +180,10 @@ class EngineProxy implements EngineBackend {
   }
 
   public setMode(mode: any) {
+    if (mode === 'MICRO_LIVE' || mode === 'LIVE') {
+      this.switchToLiveApk();
+      return this.liveApk.setMode(mode);
+    }
     return this.activeBackend.setMode(mode);
   }
 

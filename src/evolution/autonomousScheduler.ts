@@ -132,10 +132,10 @@ export class AutonomousEvolutionScheduler {
     const hour = new Date().getHours();
     const isWeekend = [0, 6].includes(new Date().getDay());
 
-    let buyerInflow = 42 + Math.floor((Math.random() - 0.4) * 20);
-    const blockTip = 0.0008 + (Math.random() - 0.4) * 0.0006;
-    let liquidity = 32.5 + (Math.random() - 0.5) * 8;
-    const fundingDensity = 24 + Math.floor(Math.random() * 20);
+    let buyerInflow = 42;
+    const blockTip = 0.0008;
+    let liquidity = 32.5;
+    const fundingDensity = 24;
 
     if (isWeekend) {
       buyerInflow = Math.max(12, buyerInflow - 20);

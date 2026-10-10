@@ -5,5 +5,5 @@ pub mod state;
 
 pub use journal::{JournalEvent, JournalRecord, PositionJournal};
 pub use manager::{PositionManager, PositionSummary};
-pub use recovery::{BalanceProvider, MockBalanceProvider, ReconciliationStatus, StartupRecoveryEngine};
+pub use recovery::{BalanceProvider, MockBalanceProvider, ProductionRpcBalanceProvider, ReconciliationStatus, StartupRecoveryEngine};
 pub use state::{PositionExitState, PositionState};
