@@ -1,6 +1,27 @@
 export type OperatingMode = 'SIMULATION' | 'MICRO_LIVE' | 'PAUSED' | 'RECOVERING' | 'KILLED' | 'OBSERVE' | 'SHADOW';
 export type TrafficLightStatus = 'AUTONOMOUS' | 'TUNING' | 'PROBLEM' | 'STOPPED';
 
+/**
+ * Единый атомарный стейт торгового ядра (Finite State Machine):
+ * - NO_KEY: Ключ не загружен, сокет спит, UI заблокирован
+ * - IDLE_READY: Ключ загружен, баланс проверен ончейн, ожидает клика ЗАПУСК
+ * - SCANNING: WSS активен, идет расчет Net Inflow коридора 6-25 SOL
+ * - SUBMITTING_ORDER: Атомарная блокировка: транзакция подписана, отправлена в Jito/RPC
+ * - IN_POSITION: Позиция открыта: работают Grace Period (12с), Take-Profit и Time-Stop
+ * - CLOSING_POSITION: Атомарный выход: ордер на продажу отправлен в сеть
+ * - COOLDOWN: Защитная пауза после закрытия/стопа перед следующим циклом
+ * - TERMINATED: Аварийный стоп: сброс ресурсов
+ */
+export type BotState = 
+  | 'NO_KEY'
+  | 'IDLE_READY'
+  | 'SCANNING'
+  | 'SUBMITTING_ORDER'
+  | 'IN_POSITION'
+  | 'CLOSING_POSITION'
+  | 'COOLDOWN'
+  | 'TERMINATED';
+
 export type SyntheticFailureCode = 
   | 'DISCONNECT'
   | 'JITO_NOT_LANDED'
@@ -94,6 +115,8 @@ export interface ClosedDealItem {
   scenarioRu: string;
   reasonRu: string;
   holdTimeSec: number;
+  signature?: string;
+  solscanUrl?: string;
 }
 
 export interface HealthIndicators {
@@ -113,7 +136,7 @@ export interface DecisionItem {
   actionRu: string;
   reasonRu: string;
   detailsRu?: string;
-  bundleStatus?: 'Pending' | 'Landed' | 'Failed';
+  bundleStatus?: 'Pending' | 'Landed' | 'Failed' | 'Dropped';
 }
 
 export interface TargetMetric {
@@ -350,6 +373,7 @@ export interface EvolutionCycleResult {
 export interface EngineStateV2 {
   trafficLight: TrafficLightStatus;
   mode: OperatingMode;
+  botState?: BotState;
   autopilotArmed: boolean;
   liveActionTextRu: string;
   balanceSol: number;

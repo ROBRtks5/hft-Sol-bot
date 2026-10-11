@@ -62,10 +62,10 @@ import {
  * на логических слотах Solana со сценариями синтетических сбоев и авто-восстановления.
  */
 export class SimulatorBackendAdapter implements EngineBackend {
-  private state: EngineStateV2;
-  private listeners: ((s: EngineStateV2) => void)[] = [];
-  private signingAdapter: SigningAdapter;
-  private keepAwakeAdapter: KeepAwakeAdapter;
+  protected state: EngineStateV2;
+  protected listeners: ((s: EngineStateV2) => void)[] = [];
+  protected signingAdapter: SigningAdapter;
+  protected keepAwakeAdapter: KeepAwakeAdapter;
   private timer: any = null;
   private baselineParams: StrategyParams;
   private currentSlot: number = 294820140;
@@ -214,50 +214,11 @@ export class SimulatorBackendAdapter implements EngineBackend {
           { name: 'Дев-дамп (ловушка)', count: 3, pct: 7 },
         ],
       },
-      candidates: [
-        {
-          mint: '4kKq...77vX',
-          symbol: 'FROGGY',
-          status: 'safe',
-          buyersCount: 52,
-          smartMoneyPresent: true,
-          trendScore: 88,
-          oneLineReasonRu: 'Чистый контракт, создатель вышел, 52 живых покупателя за 30 секунд.',
-          liquiditySol: 34.2,
-        },
-        {
-          mint: '8kLp...99aA',
-          symbol: 'CATROCKET',
-          status: 'suspicious',
-          buyersCount: 19,
-          smartMoneyPresent: false,
-          trendScore: 42,
-          oneLineReasonRu: 'Подозрительно высокая концентрация монет на 3 связанных адресах.',
-          liquiditySol: 18.5,
-        },
-        {
-          mint: '2mNq...77zZ',
-          symbol: 'SCAMCOIN',
-          status: 'scam',
-          buyersCount: 6,
-          smartMoneyPresent: false,
-          trendScore: 10,
-          oneLineReasonRu: 'Обнаружен скрытый запрет на продажу (TransferHook blacklisting).',
-          liquiditySol: 8.1,
-        },
-      ],
+      candidates: [],
       smartWallets: [
         {
-          pubkey: '3B9z...jKw8',
-          tagRu: 'Надёжный снайпер',
-          winratePct: 82,
-          avgHoldMin: 1.8,
-          isActiveNow: true,
-          following: true,
-        },
-        {
-          pubkey: 'G5qR...9xLm',
-          tagRu: 'Быстро сливает (осторожно)',
+          pubkey: '7xKX...3b8N',
+          tagRu: 'Снайпер первого блока',
           winratePct: 61,
           avgHoldMin: 0.5,
           isActiveNow: false,
@@ -428,14 +389,7 @@ export class SimulatorBackendAdapter implements EngineBackend {
     if (typeof window === 'undefined') return;
     this.timer = setInterval(() => {
       this.currentSlot += 4;
-      // Плавное обновление времени удержания открытой позиции
-      if (this.state.activePosition && this.state.mode !== 'PAUSED' && this.state.mode !== 'KILLED') {
-        this.state.activePosition.holdTimeSec += 3;
-        const delta = (Math.random() - 0.48) * 0.4;
-        this.state.activePosition.currentPercent = Number(
-          (this.state.activePosition.currentPercent + delta).toFixed(1)
-        );
-      }
+      // В боевом режиме симуляция случайных цен исключена
       this.state.keepAwake = this.keepAwakeAdapter.getStatus();
       this.state.lastSyncTs = Date.now();
       // Stage 30 Vital signs & ping update
@@ -479,7 +433,7 @@ export class SimulatorBackendAdapter implements EngineBackend {
     };
   }
 
-  private notify() {
+  protected notify() {
     this.listeners.forEach((cb) => cb({ ...this.state }));
   }
 

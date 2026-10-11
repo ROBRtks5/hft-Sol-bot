@@ -104,7 +104,8 @@ export class RealSolanaSigningAdapter implements SigningAdapter {
       return { success: false, errorRu: 'Оператор отменил подтверждение биометрией.' };
     }
     try {
-      const connection = new Connection(this.rpcUrl, 'confirmed');
+      const rpcUrl = SecureStorage.getCustomRpcUrl() || this.rpcUrl;
+      const connection = new Connection(rpcUrl, 'confirmed');
       const lamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
       const transaction = new Transaction().add(SystemProgram.transfer({ fromPubkey: keypair.publicKey, toPubkey: destinationPubkey, lamports: lamports }));
       const { blockhash } = await connection.getLatestBlockhash('confirmed');

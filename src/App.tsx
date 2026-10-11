@@ -13,7 +13,8 @@ import {
   Trash2, 
   X
 } from 'lucide-react';
-import { EngineBackend, EngineStateV2 } from './backend';
+import { EngineBackend, EngineStateV2, BotState } from './backend';
+import { LiveApkAdapter, CandidateMetric } from './backend/liveApkAdapter';
 import { defaultTradeWalJournal, WalTradeRecord } from './backend/tradeWalJournal';
 import { SecureStorage, convertHttpToWsUrl } from './secureStorage';
 import { TargetMetric } from './types/backend';
@@ -34,8 +35,30 @@ export default function App() {
   const [publicAddress, setPublicAddress] = useState<string | null>(null);
   const [isActionPending, setIsActionPending] = useState<boolean>(false);
   const [journalSubTab, setJournalSubTab] = useState<'trades' | 'radar'>('radar');
-  const [topTargets, setTopTargets] = useState<TargetMetric[]>([]);
+  const [topTargets, setTopTargets] = useState<CandidateMetric[]>([]);
+  const [liveBalance, setLiveBalance] = useState<number>(0);
   const [rpcInput, setRpcInput] = useState<string>(() => EngineBackend.getCustomRpcUrl?.() || '');
+  const lastActionTimestampRef = React.useRef<number>(0);
+
+  // СЦЕНАРИЙ 1: Защита от дребезга контактов и спама кнопками (debounce 400 мс)
+  const checkDebounce = (cooldownMs = 400): boolean => {
+    const now = Date.now();
+    if (now - lastActionTimestampRef.current < cooldownMs) {
+      return false;
+    }
+    lastActionTimestampRef.current = now;
+    return true;
+  };
+
+  // Poll LiveApkAdapter candidates and balance directly
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const adapter = LiveApkAdapter.getInstance();
+      setLiveBalance(adapter.balanceSol);
+      setTopTargets(adapter.getTopCandidates());
+    }, 500);
+    return () => clearInterval(timer);
+  }, []);
 
   const refreshWalFeed = async () => {
     try {
@@ -61,7 +84,7 @@ export default function App() {
         lastDecisionsCount = currentDecisionsCount;
         refreshWalFeed();
       }
-      const liveCandidates = EngineBackend.getTopCorridorCandidates ? EngineBackend.getTopCorridorCandidates() : [];
+      const liveCandidates = LiveApkAdapter.getInstance().getTopCandidates();
       setTopTargets(liveCandidates);
     });
     refreshWalFeed();
@@ -112,7 +135,7 @@ export default function App() {
   };
 
   const handleStartTrading = async () => {
-    if (isActionPending) return;
+    if (!checkDebounce(400) || isActionPending) return;
     setIsActionPending(true);
     try {
       const res = await EngineBackend.startEngine('MICRO_LIVE');
@@ -129,7 +152,7 @@ export default function App() {
   };
 
   const handlePauseTrading = async () => {
-    if (isActionPending) return;
+    if (!checkDebounce(400) || isActionPending) return;
     setIsActionPending(true);
     try {
       await EngineBackend.pauseEngine();
@@ -142,7 +165,7 @@ export default function App() {
   };
 
   const handleEmergencyStop = async () => {
-    if (isActionPending) return;
+    if (!checkDebounce(400) || isActionPending) return;
     setIsActionPending(true);
     try {
       await EngineBackend.emergencyKill();
@@ -198,23 +221,45 @@ export default function App() {
   };
 
   const handleClearKey = async () => {
-    if (engine.activePosition) {
-      triggerToast('Сначала закройте позицию через Аварийный стоп');
+    if (!checkDebounce(400) || isActionPending) return;
+
+    const live = LiveApkAdapter.getInstance();
+
+    // СЦЕНАРИЙ 1: Защита от удаления ключа во время in-flight ордера
+    if (live.state === 'SUBMITTING_ORDER' || live.state === 'CLOSING_POSITION') {
+      triggerToast('Дождитесь подтверждения отправленного ордера или нажмите Аварийный стоп');
       return;
     }
-    const ok = await SecureStorage.clearSeed();
-    if (ok) {
-      triggerToast('Ключ удален из памяти устройства');
-      const signing = EngineBackend.getSigningAdapter();
-      if (signing && signing.loadFromKeystore) {
-        await signing.loadFromKeystore();
+
+    if (live.activePosition) {
+      triggerToast('Сначала закройте открытую позицию через Аварийный стоп');
+      return;
+    }
+
+    setIsActionPending(true);
+    try {
+      // 1. Безопасный разрыв сетевых соединений и остановка таймеров
+      await live.stop('Забыть кошелек: разрыв соединений');
+
+      // 2. Стирание закрытого ключа из локального Keystore
+      const ok = await SecureStorage.clearSeed();
+      if (ok) {
+        await EngineBackend.pauseEngine();
+        await live.initFromKeypair(null);
+        triggerToast('Ключ удален из памяти устройства');
+        const signing = EngineBackend.getSigningAdapter();
+        if (signing && signing.loadFromKeystore) {
+          await signing.loadFromKeystore();
+        }
+        await refreshWalletMeta();
+        if (EngineBackend.syncRealAccount) {
+          await EngineBackend.syncRealAccount();
+        }
+      } else {
+        triggerToast('Удаление отклонено оператором');
       }
-      await refreshWalletMeta();
-      if (EngineBackend.syncRealAccount) {
-        await EngineBackend.syncRealAccount();
-      }
-    } else {
-      triggerToast('Удаление отклонено оператором');
+    } finally {
+      setIsActionPending(false);
     }
   };
 
@@ -259,10 +304,13 @@ export default function App() {
     return `${addr.slice(0, 4)}...${addr.slice(-4)}`;
   };
 
-  // Status computation
-  const isTrading = engine.mode === 'MICRO_LIVE';
-  const isKilled = engine.mode === 'KILLED';
-  const isRealError = isKilled || (hasStoredKey && engine.healthIndicators?.blockchainConnection === 'red');
+  // FSM-контроллер состояния торгового ядра
+  const rawBalance = LiveApkAdapter.getInstance().balanceSol;
+  const liveState = LiveApkAdapter.getInstance().state;
+  const botState: BotState = engine.botState || liveState;
+
+  const isTrading = botState === 'SCANNING' || botState === 'SUBMITTING_ORDER' || botState === 'IN_POSITION' || botState === 'CLOSING_POSITION' || botState === 'COOLDOWN';
+  const isKilled = botState === 'TERMINATED' || engine.mode === 'KILLED';
 
   // Live Risk parameters from engine (defaults: 0.02 SOL, 0.10 SOL, 3)
   const currentMaxTradeSol = engine.microLive?.maxTradeSol ?? 0.02;
@@ -279,65 +327,108 @@ export default function App() {
   let headerDotColor = 'bg-amber-400';
   let headerStatusText = 'PAUSED';
 
-  if (isTrading) {
-    statusLabel = 'ТОРГУЕТ';
-    statusBadgeColor = 'bg-emerald-400 animate-pulse';
-    statusTextColor = 'text-emerald-400';
-    statusBgCard = 'bg-[#0f1f18] border-emerald-500/40 shadow-[0_0_20px_rgba(16,185,129,0.1)]';
-    headerDotColor = 'bg-emerald-400 animate-pulse';
-    headerStatusText = 'LIVE';
-  } else if (isKilled) {
-    statusLabel = 'ОШИБКА';
-    statusReason = 'Аварийная остановка';
-    statusBadgeColor = 'bg-rose-500';
-    statusTextColor = 'text-rose-400';
-    statusBgCard = 'bg-[#221014] border-rose-500/40';
-    headerDotColor = 'bg-rose-500';
-    headerStatusText = 'KILLED';
-  } else if (isRealError) {
-    statusLabel = 'ОШИБКА';
-    statusReason = engine.liveActionTextRu || 'Сбой соединения RPC';
-    statusBadgeColor = 'bg-rose-500';
-    statusTextColor = 'text-rose-400';
-    statusBgCard = 'bg-[#221014] border-rose-500/40';
-    headerDotColor = 'bg-rose-500';
-    headerStatusText = 'ERROR';
-  } else if (hasStoredKey) {
-    statusLabel = 'ГОТОВ К ЗАПУСКУ';
-    statusReason = (engine.balanceSol || 0) < 0.01 
-      ? 'Ожидание пополнения (мин. 0.01 SOL)' 
-      : 'Подключен';
-    statusBadgeColor = 'bg-emerald-400';
-    statusTextColor = 'text-emerald-400';
-    statusBgCard = 'bg-[#0f1d17] border-emerald-600/40 shadow-[0_0_15px_rgba(16,185,129,0.08)]';
-    headerDotColor = 'bg-emerald-400';
-    headerStatusText = 'READY';
-  } else {
-    statusLabel = 'НА ПАУЗЕ';
-    statusReason = 'Ожидание ключа';
-    statusBadgeColor = 'bg-amber-400';
-    statusTextColor = 'text-amber-400';
-    statusBgCard = 'bg-[#151a22] border-slate-700/60';
-    headerDotColor = 'bg-amber-400';
-    headerStatusText = 'PAUSED';
+  switch (botState) {
+    case 'SCANNING':
+      statusLabel = 'СКАНИРОВАНИЕ (WSS)';
+      statusReason = 'Поиск импульса в коридоре 6–25 SOL';
+      statusBadgeColor = 'bg-emerald-400 animate-pulse';
+      statusTextColor = 'text-emerald-400';
+      statusBgCard = 'bg-[#0f1f18] border-emerald-500/40 shadow-[0_0_20px_rgba(16,185,129,0.1)]';
+      headerDotColor = 'bg-emerald-400 animate-pulse';
+      headerStatusText = 'SCANNING';
+      break;
+
+    case 'SUBMITTING_ORDER':
+      statusLabel = 'ОТПРАВКА ОРДЕРА';
+      statusReason = 'Jito MEV бандл подписан и отправлен';
+      statusBadgeColor = 'bg-cyan-400 animate-pulse';
+      statusTextColor = 'text-cyan-400';
+      statusBgCard = 'bg-[#0d1e27] border-cyan-500/40 shadow-[0_0_20px_rgba(6,182,212,0.15)]';
+      headerDotColor = 'bg-cyan-400 animate-pulse';
+      headerStatusText = 'ORDER_SUBMIT';
+      break;
+
+    case 'IN_POSITION':
+      statusLabel = 'В ПОЗИЦИИ';
+      statusReason = engine.activePosition
+        ? `${engine.activePosition.symbol} | PnL: ${engine.activePosition.currentPercent >= 0 ? '+' : ''}${engine.activePosition.currentPercent}%`
+        : 'Сопровождение сделки';
+      statusBadgeColor = 'bg-purple-400 animate-pulse';
+      statusTextColor = 'text-purple-400';
+      statusBgCard = 'bg-[#1b122c] border-purple-500/40 shadow-[0_0_20px_rgba(168,85,247,0.15)]';
+      headerDotColor = 'bg-purple-400 animate-pulse';
+      headerStatusText = 'IN_POSITION';
+      break;
+
+    case 'CLOSING_POSITION':
+      statusLabel = 'ЗАКРЫТИЕ ПОЗИЦИИ';
+      statusReason = 'Отправка ордера на продажу';
+      statusBadgeColor = 'bg-orange-400 animate-pulse';
+      statusTextColor = 'text-orange-400';
+      statusBgCard = 'bg-[#26180c] border-orange-500/40 shadow-[0_0_20px_rgba(249,115,22,0.15)]';
+      headerDotColor = 'bg-orange-400 animate-pulse';
+      headerStatusText = 'CLOSING';
+      break;
+
+    case 'COOLDOWN':
+      statusLabel = 'ЗАЩИТНЫЙ КУЛДАУН';
+      statusReason = 'Пауза после сделки перед следующим циклом';
+      statusBadgeColor = 'bg-amber-400';
+      statusTextColor = 'text-amber-400';
+      statusBgCard = 'bg-[#1e1a12] border-amber-600/40';
+      headerDotColor = 'bg-amber-400';
+      headerStatusText = 'COOLDOWN';
+      break;
+
+    case 'TERMINATED':
+      statusLabel = 'ОСТАНОВЛЕН';
+      statusReason = 'Аварийный сброс ресурсов';
+      statusBadgeColor = 'bg-rose-500';
+      statusTextColor = 'text-rose-400';
+      statusBgCard = 'bg-[#221014] border-rose-500/40';
+      headerDotColor = 'bg-rose-500';
+      headerStatusText = 'TERMINATED';
+      break;
+
+    case 'IDLE_READY':
+      statusLabel = 'ГОТОВ К ЗАПУСКУ';
+      statusReason = rawBalance < 0.01 
+        ? 'Ожидание пополнения (мин. 0.01 SOL)' 
+        : 'Ключ загружен, баланс проверен';
+      statusBadgeColor = 'bg-emerald-400';
+      statusTextColor = 'text-emerald-400';
+      statusBgCard = 'bg-[#0f1d17] border-emerald-600/40 shadow-[0_0_15px_rgba(16,185,129,0.08)]';
+      headerDotColor = 'bg-emerald-400';
+      headerStatusText = 'IDLE_READY';
+      break;
+
+    case 'NO_KEY':
+    default:
+      statusLabel = 'НЕТ КЛЮЧА';
+      statusReason = 'Импортируйте сид-фразу в Настройках';
+      statusBadgeColor = 'bg-amber-400';
+      statusTextColor = 'text-amber-400';
+      statusBgCard = 'bg-[#151a22] border-slate-700/60';
+      headerDotColor = 'bg-amber-400';
+      headerStatusText = 'NO_KEY';
+      break;
   }
 
   // Consistent Scenario & Action lines
-  const scenarioTitle = !hasStoredKey
+  const scenarioTitle = !hasStoredKey || botState === 'NO_KEY'
     ? 'ОЖИДАНИЕ ИНИЦИАЛИЗАЦИИ / КОШЕЛЕК НЕ ПОДКЛЮЧЕН'
-    : (engine.activePosition
-      ? `СОПРОВОЖДЕНИЕ ПОЗИЦИИ / ${engine.activePosition.symbol}`
-      : 'ПОИСК ИМПУЛЬСА / PUMP.FUN');
+    : (engine.activePosition || botState === 'IN_POSITION'
+      ? `СОПРОВОЖДЕНИЕ ПОЗИЦИИ / ${engine.activePosition?.symbol || 'PUMP'}`
+      : (botState === 'COOLDOWN' ? 'ЗАЩИТНАЯ ПАУЗА ДВИЖКА' : 'ПОИСК ИМПУЛЬСА / PUMP.FUN'));
 
-  const actionText = !hasStoredKey
+  const actionText = !hasStoredKey || botState === 'NO_KEY'
     ? '🔒 Откройте НАСТРОЙКИ и введите сид-фразу для активации торговли'
-    : (engine.activePosition
-      ? `В позиции: ${engine.activePosition.symbol}, вход ${engine.activePosition.entrySol} SOL, сейчас ${engine.activePosition.currentPercent >= 0 ? '+' : ''}${engine.activePosition.currentPercent}%`
-      : (engine.liveActionTextRu || 'Поиск импульса в bonding curve...'));
+    : (engine.activePosition || botState === 'IN_POSITION'
+      ? `В позиции: ${engine.activePosition?.symbol || 'PUMP'}, вход ${engine.activePosition?.entrySol || 0.035} SOL, сейчас ${engine.activePosition && engine.activePosition.currentPercent >= 0 ? '+' : ''}${engine.activePosition?.currentPercent || 0}%`
+      : (botState === 'COOLDOWN' ? 'Кулдаун после сделки перед новым циклом...' : (engine.liveActionTextRu || 'Поиск импульса в bonding curve...')));
 
-  // Honest Money Metrics (from IndexedDB WAL and Engine state)
+  // Honest Money Metrics (from LiveApkAdapter and WAL)
   const hasDeals = walTrades.length > 0 || (engine.closedDeals && engine.closedDeals.length > 0) || (engine.decisions && engine.decisions.length > 0);
-  const rawBalance = engine.balanceSol || engine.wallets?.balanceSol || 0;
   const balanceDisplay = hasStoredKey ? `${rawBalance.toFixed(2)} SOL` : 'Ключ не введён';
   const realPnlSol = walTodayPnl.count > 0 ? walTodayPnl.todayPnlSol : (engine.earnedTodaySol || 0);
   const pnlNum = Number(realPnlSol.toFixed(2));
@@ -352,12 +443,14 @@ export default function App() {
   const isBalanceSufficient = rawBalance >= 0.01;
 
   let gateBlockedReason: string | null = null;
-  if (!isKeyOk) {
+  if (!isKeyOk || botState === 'NO_KEY') {
     gateBlockedReason = 'Запуск заблокирован: Ключ не импортирован';
   } else if (!isNetworkOk) {
     gateBlockedReason = 'Запуск заблокирован: Ожидание подключения к RPC сети';
   } else if (!isBalanceSufficient) {
-    gateBlockedReason = `Запуск заблокирован: Баланс кошелька ниже 0.01 SOL (сейчас ${rawBalance.toFixed(3)} SOL)`;
+    gateBlockedReason = `Баланс ${rawBalance.toFixed(3)} SOL < мин. резерва 0.01 SOL`;
+  } else if (botState !== 'IDLE_READY' && botState !== 'TERMINATED') {
+    gateBlockedReason = `Запуск невозможен из состояния "${botState}" (требуется IDLE_READY)`;
   }
 
   const isGateOpen = gateBlockedReason === null;
@@ -590,6 +683,7 @@ export default function App() {
                         topTargets.map((target, idx) => {
                           const isHighReadiness = target.readinessScore >= 85;
                           const formattedMint = target.mint.length > 12 ? `${target.mint.slice(0, 4)}...${target.mint.slice(-4)}` : target.mint;
+                          const badgeRu = target.isCto ? 'CTO АБСОРБЦИЯ' : 'ЧИСТЫЙ ПРИТОК';
 
                           return (
                             <div 
@@ -602,7 +696,7 @@ export default function App() {
                             >
                               <div className="flex justify-between items-center mb-1">
                                 <div className="flex items-center space-x-1.5">
-                                  <span className="font-bold text-slate-100 text-xs">${target.symbol}</span>
+                                  <span className="font-bold text-slate-100 text-xs">${target.ticker}</span>
                                   <button
                                     onClick={() => {
                                       navigator.clipboard.writeText(target.mint);
@@ -614,7 +708,7 @@ export default function App() {
                                     ({formattedMint})
                                   </button>
                                   <span className="px-1.5 py-0.2 rounded text-[8px] font-bold bg-amber-950/80 text-amber-300 border border-amber-800/60">
-                                    {target.ctoBadgeRu}
+                                    {badgeRu}
                                   </span>
                                 </div>
                                 <span className={`px-1.5 py-0.2 rounded font-bold text-[9px] ${isHighReadiness ? 'bg-amber-500 text-slate-950' : 'bg-slate-800 text-slate-300'}`}>
@@ -623,9 +717,9 @@ export default function App() {
                               </div>
 
                               <div className="grid grid-cols-3 gap-1 text-[9px] text-slate-300 mb-1.5">
-                                <div>Кривая: <span className="text-amber-300 font-bold">{target.curveSol} SOL</span></div>
-                                <div>Приток: <span className="text-emerald-400 font-bold">{target.netInflowSol >= 0 ? '+' : ''}{target.netInflowSol} SOL/5с</span></div>
-                                <div>Покупателей: <span className="text-slate-100 font-bold">{target.buyersCount}</span></div>
+                                <div>Кривая: <span className="text-amber-300 font-bold">{target.bondingSol.toFixed(1)} SOL</span></div>
+                                <div>Приток: <span className="text-emerald-400 font-bold">{target.netInflow5s >= 0 ? '+' : ''}{target.netInflow5s.toFixed(2)} SOL/5с</span></div>
+                                <div>Покупателей: <span className="text-slate-100 font-bold">{target.uniqueBuyers}</span></div>
                               </div>
 
                               {/* Progress bar */}
@@ -781,7 +875,7 @@ export default function App() {
 
                   {/* Completed WAL Trades */}
                   {walTrades.length > 0 ? (
-                    walTrades.map((trade) => (
+                    walTrades.slice(0, 40).map((trade) => (
                       <div key={trade.id} className="border-b border-slate-800/60 pb-2 last:border-b-0">
                         <div className="flex justify-between items-center text-[10px] text-slate-400 mb-0.5">
                           <span>{trade.holdTimeSec ? `${trade.holdTimeSec}s удержание` : trade.side}</span>
@@ -814,45 +908,35 @@ export default function App() {
                             {trade.reasonRu}
                           </div>
                         )}
-                      </div>
-                    ))
-                  ) : engine.closedDeals && engine.closedDeals.length > 0 ? (
-                    engine.closedDeals.map((deal) => (
-                      <div key={deal.id} className="border-b border-slate-800/60 pb-2 last:border-b-0">
-                        <div className="flex justify-between items-center text-[10px] text-slate-400 mb-0.5">
-                          <span>{deal.holdTimeSec}s удержание</span>
-                          <span className="font-mono">{deal.scenarioRu}</span>
-                        </div>
-                        <div className="flex justify-between items-center">
-                          <div>
-                            <span className={deal.profitSol >= 0 ? 'text-emerald-400 font-bold mr-1.5' : 'text-rose-400 font-bold mr-1.5'}>
-                              {deal.profitSol >= 0 ? 'ПРОДАЖА (TP)' : 'ВЫХОД (SL)'}
-                            </span>
-                            <span className="text-slate-200 font-semibold">{deal.symbol}</span>
+                        {trade.signature && (
+                          <div className="mt-1 text-[10px] font-mono text-slate-400 flex items-center justify-between bg-[#0b0f14] px-2 py-1 rounded border border-slate-800">
+                            <span className="text-slate-500">TX:</span>
+                            <a
+                              href={trade.solscanUrl || `https://solscan.io/tx/${trade.signature}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-amber-400 hover:text-amber-300 font-mono underline cursor-pointer"
+                              title="Открыть транзакцию на Solscan"
+                            >
+                              {trade.signature.length > 14 ? `${trade.signature.slice(0, 6)}...${trade.signature.slice(-6)}` : trade.signature}
+                            </a>
                           </div>
-                          <div className="text-right">
-                            <span className={`font-bold mr-2 ${deal.profitPct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                              {deal.profitPct >= 0 ? '+' : ''}{deal.profitPct}%
-                            </span>
-                            <span className="text-slate-400">{deal.profitSol >= 0 ? '+' : ''}{deal.profitSol.toFixed(4)} SOL</span>
-                          </div>
-                        </div>
+                        )}
                       </div>
                     ))
                   ) : null}
 
-                  {/* Empty state when no active position, no trade attempts, and no closed deals */}
+                  {/* Empty state when no active position, no trade attempts, and no walTrades */}
                   {!engine.activePosition &&
                    (!engine.decisions || engine.decisions.filter((d) => d.kind === 'trade_attempt' || d.kind === 'bought' || d.kind === 'sold' || d.actionRu.includes('ПОКУПКА') || d.actionRu.includes('ВЫСТРЕЛ')).length === 0) &&
-                   walTrades.length === 0 &&
-                   (!engine.closedDeals || engine.closedDeals.length === 0) && (
+                   walTrades.length === 0 && (
                     <div className="text-center py-16 text-slate-400 space-y-2">
                       <div className="w-10 h-10 rounded-full bg-slate-800/80 flex items-center justify-center mx-auto text-emerald-400">
                         <Activity className="w-5 h-5" />
                       </div>
                       <p className="text-xs font-bold text-slate-200">Открытых позиций нет. Ожидание сигнала</p>
                       <p className="text-[11px] text-slate-400 leading-relaxed max-w-[260px] mx-auto">
-                        Робот автономно сканирует блоки Pump.fun и Raydium. Выстрелы Jito отобразятся здесь.
+                        Робот автономно сканирует блоки Pump.fun и Raydium в коридоре 6–25 SOL. Выстрелы Jito отобразятся здесь.
                       </p>
                     </div>
                   )}
@@ -1104,7 +1188,7 @@ export default function App() {
       </main>
 
       {/* Bottom Navigation Bar: EXACTLY 3 TABS */}
-      <nav className="shrink-0 border-t border-[#16202a] bg-[#0c1117] px-6 py-2 flex justify-between items-center z-20">
+      <nav className="shrink-0 border-t border-[#16202a] bg-[#0c1117] px-6 pt-2 pb-[max(env(safe-area-inset-bottom,0px),10px)] flex justify-between items-center z-30">
         <button
           onClick={() => setActiveTab('control')}
           className={`flex flex-col items-center space-y-1 py-1 cursor-pointer transition-colors ${

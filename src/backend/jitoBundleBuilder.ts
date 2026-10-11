@@ -64,17 +64,19 @@ export interface JitoBundleStatus {
 
 export class JitoBundleBuilder {
   private blockEngineUrl: string;
+  private tipAccountIndex: number = 0;
 
   constructor(customUrl?: string) {
     this.blockEngineUrl = customUrl || JITO_BLOCK_ENGINE_URL;
   }
 
   /**
-   * Randomly select one official Jito Tip account
+   * Deterministically rotate official Jito Tip accounts
    */
   public getRandomTipAccount(): PublicKey {
-    const randomIndex = Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length);
-    return new PublicKey(JITO_TIP_ACCOUNTS[randomIndex]);
+    const selected = JITO_TIP_ACCOUNTS[this.tipAccountIndex % JITO_TIP_ACCOUNTS.length];
+    this.tipAccountIndex = (this.tipAccountIndex + 1) % JITO_TIP_ACCOUNTS.length;
+    return new PublicKey(selected);
   }
 
   /**
@@ -97,7 +99,7 @@ export class JitoBundleBuilder {
     const dontFrontIx = new TransactionInstruction({
       programId: new PublicKey(JITO_DONT_FRONT_PUBKEY),
       keys: [{ pubkey: params.payerPubkey, isSigner: false, isWritable: false }],
-      data: Buffer.from([0]),
+      data: new Uint8Array([0]) as any,
     });
     tx.add(dontFrontIx);
 
@@ -224,11 +226,13 @@ export class JitoBundleBuilder {
     const PUMP_FUN_PROGRAM = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
     // Discriminator for Buy or Sell
     const discriminator = params.action === 'BUY'
-      ? Buffer.from([0x66, 0x06, 0x3d, 0x12, 0x01, 0x08, 0x88, 0xcd])
-      : Buffer.from([0x33, 0xe6, 0x85, 0xa4, 0x01, 0x7f, 0x83, 0xad]);
+      ? new Uint8Array([0x66, 0x06, 0x3d, 0x12, 0x01, 0x08, 0x88, 0xcd])
+      : new Uint8Array([0x33, 0xe6, 0x85, 0xa4, 0x01, 0x7f, 0x83, 0xad]);
 
-    const amountBuf = Buffer.alloc(8);
-    amountBuf.writeBigUInt64LE(BigInt(params.amountLamports));
+    const data = new Uint8Array(16);
+    data.set(discriminator, 0);
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    view.setBigUint64(8, BigInt(params.amountLamports), true);
 
     return new TransactionInstruction({
       programId: PUMP_FUN_PROGRAM,
@@ -236,7 +240,7 @@ export class JitoBundleBuilder {
         { pubkey: params.payer, isSigner: true, isWritable: true },
         { pubkey: params.mint, isSigner: false, isWritable: true },
       ],
-      data: Buffer.concat([discriminator, amountBuf]),
+      data: data as any,
     });
   }
 }

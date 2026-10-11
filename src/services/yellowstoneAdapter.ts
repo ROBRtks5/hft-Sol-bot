@@ -1,4 +1,5 @@
 import { MarketCandidate } from '../types/backend';
+import { convertHttpToWsUrl, SecureStorage } from '../secureStorage';
 
 export interface YellowstoneStreamListener {
   onCandidateDiscovered: (candidate: MarketCandidate) => void;
@@ -7,19 +8,21 @@ export interface YellowstoneStreamListener {
 }
 
 export class YellowstoneGrpcAdapter {
-  private wsUrl = 'wss://api.mainnet-beta.solana.com';
+  private wsUrl: string;
   private socket: WebSocket | null = null;
   private listeners: YellowstoneStreamListener[] = [];
   private isRunning = false;
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
+  private reconnectTimer: any = null;
   private fallbackInterval: any = null;
 
   private readonly PUMP_FUN_PROGRAM_ID = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
   private readonly RAYDIUM_AMM_PROGRAM_ID = '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8';
 
   constructor(customWsUrl?: string) {
-    if (customWsUrl) { this.wsUrl = customWsUrl; }
+    const rawUrl = customWsUrl || SecureStorage.getCustomRpcUrl() || 'wss://api.mainnet-beta.solana.com';
+    this.wsUrl = convertHttpToWsUrl(rawUrl);
   }
 
   public getWsUrl(): string {
@@ -27,10 +30,18 @@ export class YellowstoneGrpcAdapter {
   }
 
   public setWsUrl(newWsUrl: string) {
-    if (!newWsUrl || this.wsUrl === newWsUrl) return;
-    this.wsUrl = newWsUrl;
+    if (!newWsUrl) return;
+    const converted = convertHttpToWsUrl(newWsUrl);
+    if (this.wsUrl === converted) return;
+    this.wsUrl = converted;
     if (this.socket) {
-      try { this.socket.close(); } catch { /* ignore */ }
+      try {
+        this.socket.onopen = null;
+        this.socket.onmessage = null;
+        this.socket.onerror = null;
+        this.socket.onclose = null;
+        this.socket.close();
+      } catch { /* ignore */ }
       this.socket = null;
     }
     this.reconnectAttempts = 0;
@@ -56,8 +67,26 @@ export class YellowstoneGrpcAdapter {
 
   public stopStream() {
     this.isRunning = false;
-    if (this.socket) { try { this.socket.close(); } catch (e) { /* ignore */ } this.socket = null; }
-    if (this.fallbackInterval) { clearInterval(this.fallbackInterval); this.fallbackInterval = null; }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.socket) {
+      try {
+        this.socket.onopen = null;
+        this.socket.onmessage = null;
+        this.socket.onerror = null;
+        this.socket.onclose = null;
+        this.socket.close();
+      } catch (e) {
+        /* ignore */
+      }
+      this.socket = null;
+    }
+    if (this.fallbackInterval) {
+      clearInterval(this.fallbackInterval);
+      this.fallbackInterval = null;
+    }
     this.notifyStatus('DISCONNECTED');
   }
 
@@ -250,7 +279,15 @@ export class YellowstoneGrpcAdapter {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) { console.warn('[Yellowstone WS]: Переходим на HTTP RPC'); this.startHttpFallback(); return; }
     this.reconnectAttempts++;
     const delayMs = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 10000);
-    setTimeout(() => { if (this.isRunning) { this.connectWebSocket(); } }, delayMs);
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+    }
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.isRunning) {
+        this.connectWebSocket();
+      }
+    }, delayMs);
   }
 
   private startHttpFallback() {

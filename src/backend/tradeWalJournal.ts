@@ -34,6 +34,8 @@ export interface WalTradeRecord {
   reasonRu: string;
   detailsRu?: string;
   holdTimeSec?: number;
+  signature?: string;
+  solscanUrl?: string;
 }
 
 const DB_NAME = 'AlphaFlipTradeWalDb';

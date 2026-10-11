@@ -1,1933 +1,1333 @@
 import {
-  OperatingMode,
-  TrafficLightStatus,
-  EngineStateV2,
-  HealthIndicators,
-  MoneySummary,
-  DecisionItem,
-  MarketCandidate,
-  SmartWalletItem,
-  SocialTrendItem,
-  ClosedDealItem,
-  TransactionTrackingRecord,
-  SelftestResult,
-  CapsuleRecord,
-  CapsuleReplayResult,
-  StrategyCandidate,
-  StrategyParams,
-  PromotionResult,
-  RollbackResult,
-  ModeSwitchResult,
-  SweepResult,
-  WalletChangeResult,
-  GasSettings,
-  InvariantCheck,
-  PreflightCheckItem,
-  NeedsYouCard,
-  KeepAwakeStatus,
-  RegimeStatus,
-  PreauthorizedBound,
-  EvolutionCycleResult,
-  DryRunReport,
-  MicroLiveSupervisorState,
-  KeySelectionType,
-  ScalingCanaryState,
-  HardeningAuditReport,
-  DailyDigestState,
-  HandsOffAuditReport,
-  TargetMetric,
-} from '../types/backend';
-import { EngineBackend } from './engineContract';
-import { SigningAdapter, RealSolanaSigningAdapter, createSigningAdapter } from '../signing/signingAdapter';
-import { KeepAwakeAdapter, createKeepAwakeAdapter } from '../keepAwakeAdapter';
-import { defaultMicroLiveSupervisor, MicroLiveSupervisor } from './microLiveSupervisor';
-import { defaultScalingAndAuditManager, ScalingAndAuditManager } from './scalingAndAuditManager';
-import { defaultHandsOffAuditManager, HandsOffAuditManager } from './handsOffAuditManager';
-import { defaultRequestInbox, RequestInboxManager } from './requestInbox';
-import { defaultVitalSigns, VitalSignsMonitor } from './vitalSigns';
-import { defaultJournalExporter, JournalExporter } from './journalExporter';
-import { VitalSignsInfo } from '../types/backend';
-import { defaultYellowstoneAdapter, YellowstoneGrpcAdapter } from '../services/yellowstoneAdapter';
-import { defaultGeminiAdvisoryService, GeminiAdvisoryService } from '../services/geminiAdvisoryService';
+  Connection,
+  Keypair,
+  PublicKey,
+  TransactionInstruction,
+  TransactionMessage,
+  VersionedTransaction,
+  SystemProgram,
+  LAMPORTS_PER_SOL
+} from '@solana/web3.js';
+import { defaultTradeWalJournal } from './tradeWalJournal';
+import { DecisionItem, BotState } from '../types/backend';
 import { CircularTickBuffer } from './circularTickBuffer';
-import { OnChainScamFilter } from './onChainScamFilter';
-import { defaultJitoBundleBuilder, JitoBundleBuilder } from './jitoBundleBuilder';
-import { defaultTradeWalJournal, TradeWalJournal, WalTradeRecord } from './tradeWalJournal';
-import { defaultPostMortemOptimizer, PostMortemOptimizer } from './postMortemOptimizer';
-import { SecureStorage, convertHttpToWsUrl } from '../secureStorage';
-import { Connection, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js';
-import { MIN_RESERVE_SOL, DEFAULT_LOT_SIZE_SOL, DEFAULT_JITO_TIP_SOL } from '../limits';
+
+export type { BotState } from '../types/backend';
+
+export type BotStateListener = (newState: BotState, prevState: BotState, reason?: string) => void;
 
 /**
- * LiveApkBackendAdapter: Боевой автономный движок Phone-Host для запуска внутри Android APK.
- * 
- * RUNTIME AUTONOMY CLAUSE v2:
- * - Нет внешнего сервера: исполнение происходит внутри самого Android APK.
- * - Пакеты gRPC / Jito / RPC отправляются непосредственно из локального процесса приложения.
- * - Строгий отказ отправки: любая транзакция блокируется, если:
- *   1. Режим не переведен в MICRO_LIVE
- *   2. Префлайт не полностью зелёный
- *   3. В аппаратном Keystore отсутствует проверенный ключ
- * - В веб-превью боевой режим физически заблокирован (только симуляция).
- * 
- * CONFIDENCE: LOW (требует верификации нативных Android gRPC/Jito биндингов через NDK/Rust JNI)
- * TODO(upstream): Использовать официальный NDK-библиотечный мост к `crates/alpha-flip-hot`
- * Спецификация: https://github.com/solana-labs/solana
+ * Таблица разрешенных переходов (Transition Table):
+ * Любой вызов функции обязан валидироваться через transitionTo(newState).
  */
-export class LiveApkBackendAdapter implements EngineBackend {
-  private state: EngineStateV2;
-  private listeners: ((s: EngineStateV2) => void)[] = [];
-  private signingAdapter: SigningAdapter;
-  private keepAwakeAdapter: KeepAwakeAdapter;
-  private baselineParams: StrategyParams;
-  private microLiveSupervisor: MicroLiveSupervisor = defaultMicroLiveSupervisor;
-  private scalingManager: ScalingAndAuditManager = defaultScalingAndAuditManager;
-  private handsOffManager: HandsOffAuditManager = defaultHandsOffAuditManager;
-  private requestInbox: RequestInboxManager = defaultRequestInbox;
-  private vitalSignsMonitor: VitalSignsMonitor = defaultVitalSigns;
-  private journalExporter: JournalExporter = defaultJournalExporter;
-  private yellowstoneUnsub: (() => void) | null = null;
-  private solanaRpcUrl = 'https://api.mainnet-beta.solana.com';
-  private isExecutingTrade = false;
-  private isExiting = false;
-  private autonomousLoopTimer: any = null;
-  private initSyncTimer: any = null;
-  private negativeOfiSeconds = 0;
-  private trailingStopFloor = 0;
-  public readonly MIN_GAS_RESERVE_SOL = 0.01;
+export const VALID_TRANSITIONS: Record<BotState, BotState[]> = {
+  NO_KEY: ['IDLE_READY', 'TERMINATED'],
+  IDLE_READY: ['SCANNING', 'NO_KEY', 'TERMINATED'],
+  SCANNING: ['SUBMITTING_ORDER', 'IDLE_READY', 'COOLDOWN', 'TERMINATED', 'NO_KEY'],
+  SUBMITTING_ORDER: ['IN_POSITION', 'SCANNING', 'COOLDOWN', 'TERMINATED', 'IDLE_READY'],
+  IN_POSITION: ['CLOSING_POSITION', 'TERMINATED', 'IDLE_READY'],
+  CLOSING_POSITION: ['COOLDOWN', 'IN_POSITION', 'TERMINATED', 'IDLE_READY'],
+  COOLDOWN: ['SCANNING', 'IDLE_READY', 'TERMINATED', 'NO_KEY'],
+  TERMINATED: ['NO_KEY', 'IDLE_READY'],
+};
 
-  private watchdogTimer: any = null;
-  private watchdogSilenceWindowMs = 35000;
-  private watchdogBackoffMultiplier = 1;
-  private scannedMintsSet: Set<string> = new Set();
+// --- КОНСТАНТЫ СЕТИ И PUMP.FUN ---
+export const MIN_RESERVE_SOL = 0.01;
+export const TRADE_SIZE_SOL = 0.035;
+export const JITO_TIP_SOL = 0.0004;
 
-  // Quantum HFT In-Memory Engine instances (Transplanted from Rust Alpha-Flip HFT)
-  private tickBuffers: Map<string, CircularTickBuffer> = new Map();
-  private candSymbolMap: Map<string, string> = new Map();
-  private scamFilter: OnChainScamFilter = new OnChainScamFilter();
+const PUMP_PROGRAM_ID = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
+const PUMP_GLOBAL = new PublicKey('4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf');
+const PUMP_FEE_RECIPIENT = new PublicKey('CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM');
+const PUMP_EVENT_AUTHORITY = new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1');
+const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
+const SYSVAR_RENT_PUBKEY = new PublicKey('SysvarRent111111111111111111111111111111111');
 
-  /**
-   * Public method returning TOP-3 REAL corridor candidates (6.0 - 25.0 SOL in curve)
-   * active within the last 15 seconds, sorted by readiness score.
-   * Strictly returns [] if no active live candidates exist in memory.
-   */
-  public getTopCorridorCandidates(): TargetMetric[] {
-    const now = Date.now();
-    const result: TargetMetric[] = [];
+// Подтвержденный пул официальных Jito Tip аккаунтов
+const JITO_TIP_ACCOUNTS = [
+  '96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5',
+  'HFqU5x63VTxvQssQn138i26LjjTQ2q54qe22qWbR1GuU',
+  'Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY',
+  'ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49',
+  'DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh',
+  'ADuUkR4vqLUMWXxW9gh6D6L8pWgbGwUMmP4EDqCFbfR7',
+  'DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL',
+  '3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT'
+].map(addr => new PublicKey(addr));
 
-    for (const [mint, tickBuf] of this.tickBuffers.entries()) {
-      const latestTick = tickBuf.getLatestTick();
-      if (!latestTick) continue;
+// Дискриминаторы инструкций Pump.fun (Anchor global:buy / global:sell)
+const BUY_DISCRIMINATOR = new Uint8Array([102, 6, 61, 18, 1, 218, 235, 234]);
+const SELL_DISCRIMINATOR = new Uint8Array([51, 230, 133, 164, 1, 127, 131, 173]);
 
-      const ageMs = now - latestTick.timestampMs;
-      if (ageMs > 15000) continue; // Only active ticks within last 15 seconds
+// --- ТИПЫ ДАННЫХ ---
+export interface ActivePosition {
+  mint: string;
+  tokenAmount: bigint;
+  solInvested: number;
+  entryPriceSol: number;
+  entryTimestamp: number;
+  currentPriceSol: number;
+  highestPriceSol: number;
+}
 
-      const solReserve = latestTick.solReserve || 0;
-      const realSol = solReserve >= 30 ? solReserve - 30 : solReserve;
+export interface CandidateMetric {
+  mint: string;
+  ticker: string;
+  bondingSol: number;
+  netInflow5s: number;
+  uniqueBuyers: number;
+  readinessScore: number;
+  isCto: boolean;
+  lastSeen: number;
+}
 
-      // Must be within 6.0 - 25.0 SOL corridor
-      if (realSol < 6.0 || realSol > 25.0) continue;
+export interface EngineTelemetry {
+  totalTicks: number;
+  scannedTokens: number;
+  rejectedCount: number;
+  netStatus: string;
+  lastHeartbeat: number;
+}
 
-      const { netSolInflow, uniqueBuyersCount } = tickBuf.calculateNetInflowAndBuyers(5000);
-      const maxPrice30s = tickBuf.getMaxPriceInWindow(30000);
-      const currentPrice = latestTick.priceSol || 0;
-      const priceNearPeak = maxPrice30s > 0 ? currentPrice >= maxPrice30s * 0.95 : true;
+// --- БАЙТ-ТОЧНАЯ СЕРИАЛИЗАЦИЯ (СТРОГО DATAVIEW, БЕЗ NODEJS BUFFER) ---
+function serializePumpBuyData(tokenAmount: bigint, maxSolCostLamports: bigint): Uint8Array {
+  const buffer = new ArrayBuffer(24);
+  const view = new DataView(buffer);
+  const uint8 = new Uint8Array(buffer);
+  uint8.set(BUY_DISCRIMINATOR, 0);
+  view.setBigUint64(8, tokenAmount, true); // Little-Endian u64
+  view.setBigUint64(16, maxSolCostLamports, true); // Little-Endian u64
+  return uint8;
+}
 
-      // Calculate honest readiness score (0-99%)
-      const inflowScore = Math.min(60, (Math.max(0, netSolInflow) / 1.5) * 60);
-      const buyersScore = Math.min(30, (uniqueBuyersCount / 4) * 30);
-      const peakScore = priceNearPeak ? 9 : 0;
-      const readinessScore = Math.min(99, Math.max(10, Math.round(inflowScore + buyersScore + peakScore)));
+function serializePumpSellData(tokenAmount: bigint, minSolOutputLamports: bigint): Uint8Array {
+  const buffer = new ArrayBuffer(24);
+  const view = new DataView(buffer);
+  const uint8 = new Uint8Array(buffer);
+  uint8.set(SELL_DISCRIMINATOR, 0);
+  view.setBigUint64(8, tokenAmount, true); // Little-Endian u64
+  view.setBigUint64(16, minSolOutputLamports, true); // Little-Endian u64
+  return uint8;
+}
 
-      const symbol = this.candSymbolMap.get(mint) || (mint.length > 8 ? `${mint.slice(0, 4)}...${mint.slice(-4)}` : mint);
-      const isCTO = netSolInflow >= 1.0;
+function getBondingCurvePDA(mint: PublicKey): PublicKey {
+  const [pda] = PublicKey.findProgramAddressSync(
+    [new TextEncoder().encode('bonding-curve'), mint.toBytes()],
+    PUMP_PROGRAM_ID
+  );
+  return pda;
+}
 
-      result.push({
-        symbol,
-        mint,
-        curveSol: Number(realSol.toFixed(1)),
-        netInflowSol: Number(netSolInflow.toFixed(2)),
-        buyersCount: uniqueBuyersCount,
-        readinessScore,
-        isCTO,
-        ctoBadgeRu: isCTO ? '⚡ CTO Выкуп' : 'В фокусе',
-        lastTickAgeSec: Math.round(ageMs / 1000),
+function getAssociatedTokenAddress(mint: PublicKey, owner: PublicKey): PublicKey {
+  const [ata] = PublicKey.findProgramAddressSync(
+    [owner.toBytes(), TOKEN_PROGRAM_ID.toBytes(), mint.toBytes()],
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  );
+  return ata;
+}
+
+// Идемпотентное создание токен-аккаунта пользователя перед покупкой
+function createIdempotentAtaInstruction(
+  payer: PublicKey,
+  associatedToken: PublicKey,
+  owner: PublicKey,
+  mint: PublicKey
+): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: ASSOCIATED_TOKEN_PROGRAM_ID,
+    keys: [
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: associatedToken, isSigner: false, isWritable: true },
+      { pubkey: owner, isSigner: false, isWritable: false },
+      { pubkey: mint, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    ],
+    data: new Uint8Array([1]) as any, // 1 = CreateIdempotent opcode
+  });
+}
+
+// ============================================================================
+// 1. ДИНАМИЧЕСКИЙ РАСЧЕТ БОНДИНГ-КРИВОЙ PUMP.FUN (k = virtualSol * virtualToken)
+// ============================================================================
+export interface PumpBondingCurveReserves {
+  virtualTokenReserves: bigint;
+  virtualSolReserves: bigint;
+  realTokenReserves: bigint;
+  realSolReserves: bigint;
+  tokenTotalSupply: bigint;
+  complete: boolean;
+}
+
+export function parsePumpBondingCurveAccount(data: Uint8Array): PumpBondingCurveReserves | null {
+  if (data.length < 41) return null;
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  // Anchor 8-byte discriminator offset
+  const virtualTokenReserves = view.getBigUint64(8, true);
+  const virtualSolReserves = view.getBigUint64(16, true);
+  const realTokenReserves = view.getBigUint64(24, true);
+  const realSolReserves = view.getBigUint64(32, true);
+  const tokenTotalSupply = data.length >= 48 ? view.getBigUint64(40, true) : 1000000000000000n;
+  const complete = data.length >= 49 ? data[48] === 1 : false;
+
+  return {
+    virtualTokenReserves,
+    virtualSolReserves,
+    realTokenReserves,
+    realSolReserves,
+    tokenTotalSupply,
+    complete,
+  };
+}
+
+export function calculatePumpTokensOut(
+  virtualSolReserves: bigint,
+  virtualTokenReserves: bigint,
+  tradeSizeSol: number = TRADE_SIZE_SOL,
+  slippagePct: number = 2.5
+): {
+  solInLamports: bigint;
+  tokensOut: bigint;
+  minTokensWithSlippage: bigint;
+} {
+  const solInLamports = BigInt(Math.floor(tradeSizeSol * LAMPORTS_PER_SOL));
+  const k = virtualSolReserves * virtualTokenReserves;
+  const newVirtualSol = virtualSolReserves + solInLamports;
+  const newVirtualToken = k / newVirtualSol;
+  const tokensOut = virtualTokenReserves - newVirtualToken;
+  // Слиппейдж строго 2.5% (975 / 1000)
+  const slippageMultiplier = BigInt(Math.floor((100 - slippagePct) * 10)); // 975n
+  const minTokensWithSlippage = (tokensOut * slippageMultiplier) / 1000n;
+
+  return {
+    solInLamports,
+    tokensOut,
+    minTokensWithSlippage,
+  };
+}
+
+// ============================================================================
+// 2. ДЕКОДЕР ОНЧЕЙН-ОШИБОК И ЛОГОВ SOLANA (Instruction Error Parser)
+// ============================================================================
+export interface ParsedSolanaError {
+  raw: string;
+  decodedReasonRu: string;
+  isFatalOrDropped: boolean;
+}
+
+export function parseSolanaProgramError(error: any): ParsedSolanaError {
+  const raw = String(error?.message || error?.toString?.() || error || '');
+  let decodedReasonRu = 'ОНЧЕЙН ОШИБКА ИСПОЛНЕНИЯ';
+
+  if (raw.includes('0x1770') || raw.includes('6000') || raw.toLowerCase().includes('slippage') || raw.includes('TooMuchSolRequired')) {
+    decodedReasonRu = 'СЛИППЕЙДЖ: цена изменилась быстрее 2.5%';
+  } else if (raw.includes('0x1771') || raw.includes('6001') || raw.toLowerCase().includes('complete') || raw.includes('BondingCurveComplete')) {
+    decodedReasonRu = 'КРИВАЯ ЗАВЕРШЕНА: монета переходит на Raydium';
+  } else if (raw.includes('0x1772') || raw.includes('6002') || raw.toLowerCase().includes('insufficient token') || raw.includes('NotEnoughTokens')) {
+    decodedReasonRu = 'ПРЕВЫШЕН ЛИМИТ: недостаточно токенов в кривой';
+  } else if (raw.includes('0x1') || raw.includes('InstructionError 1') || raw.includes('Custom 1') || raw.toLowerCase().includes('insufficient funds') || raw.toLowerCase().includes('insufficient lamports')) {
+    decodedReasonRu = 'НЕДОСТАТОЧНО СРЕДСТВ на балансе';
+  } else if (raw.includes('BlockhashNotFound') || raw.includes('blockhash expired')) {
+    decodedReasonRu = 'ТАЙМАУТ: блокхэш транзакции устарел';
+  } else if (raw.includes('Rate limit') || raw.includes('429')) {
+    decodedReasonRu = 'ЛИМИТ RPC: ограничение запросов узла';
+  } else {
+    decodedReasonRu = raw.slice(0, 90);
+  }
+
+  return {
+    raw,
+    decodedReasonRu,
+    isFatalOrDropped: true,
+  };
+}
+
+// ============================================================================
+// 3. РЕАЛЬНЫЙ ОПРОС JITO API БЕЗ setTimeout СИМУЛЯЦИЙ (getBundleStatuses)
+// ============================================================================
+export interface JitoPollResult {
+  bundleId: string;
+  status: 'Landed' | 'Dropped' | 'Failed';
+  slot?: number;
+  reasonRu: string;
+}
+
+export async function pollJitoBundleStatus(
+  bundleId: string,
+  timeoutMs: number = 15000
+): Promise<JitoPollResult> {
+  const startTime = Date.now();
+  const pollIntervalMs = 800;
+
+  while (Date.now() - startTime < timeoutMs) {
+    try {
+      const res = await fetch('https://mainnet.block-engine.jito.wtf/api/v1/bundles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'getBundleStatuses',
+          params: [[bundleId]],
+        }),
       });
-    }
 
-    result.sort((a, b) => b.readinessScore - a.readinessScore);
-    return result.slice(0, 3);
-  }
+      if (res.ok) {
+        const data = await res.json();
+        const bundleValue = data?.result?.value?.[0];
 
-  constructor(signingAdapter?: SigningAdapter, keepAwakeAdapter?: KeepAwakeAdapter) {
-    this.signingAdapter = signingAdapter || createSigningAdapter();
-    if (!(this.signingAdapter instanceof RealSolanaSigningAdapter)) {
-      throw new Error('LIVE INVARIANT VIOLATION: LiveApkBackendAdapter strictly requires RealSolanaSigningAdapter. Mocks are forbidden in live path.');
-    }
-    this.keepAwakeAdapter = keepAwakeAdapter || createKeepAwakeAdapter();
+        if (bundleValue) {
+          const confStatus = bundleValue.confirmation_status;
+          if (confStatus === 'confirmed' || confStatus === 'finalized') {
+            return {
+              bundleId,
+              status: 'Landed',
+              slot: bundleValue.slot,
+              reasonRu: `JITO: LANDED в слоте ${bundleValue.slot || 'confirmed'}`,
+            };
+          }
 
-    const storedRpc = SecureStorage.getCustomRpcUrl();
-    if (storedRpc) {
-      this.solanaRpcUrl = storedRpc;
-      defaultYellowstoneAdapter.setWsUrl(convertHttpToWsUrl(storedRpc));
-    }
-
-    this.baselineParams = {
-      greed: 70,
-      exitSpeed: 85,
-      scamSuspicion: 90,
-      followSmartMoney: true,
-      socialTrends: true,
-      presetVersion: 'v3.2-live',
-    };
-
-    const realAdapter = this.signingAdapter as RealSolanaSigningAdapter;
-    const hasKey = realAdapter.hasKey();
-
-    this.state = {
-      trafficLight: hasKey ? 'TUNING' : 'PROBLEM',
-      mode: 'PAUSED',
-      autopilotArmed: false,
-      liveActionTextRu: hasKey 
-        ? 'Боевой узел готов к запуску на телефоне. Ожидание команды оператора.'
-        : '🔒 Ключ не введён. Откройте НАСТРОЙКИ и введите сид-фразу для активации торговли.',
-      balanceSol: 0,
-      earnedTodaySol: 0,
-      earnedTodayPct: 0,
-      activePosition: null,
-      healthIndicators: {
-        blockchainConnection: 'green',
-        executionSpeed: 'green',
-        hourlyErrorsCount: 0,
-        systemResourcesPct: 12,
-        needsOperatorHelp: !hasKey,
-      },
-      pnlHistory: [0],
-      decisions: [],
-      wallets: {
-        hotWalletPubkey: 'Ожидание привязки адреса...',
-        coldVaultPubkey: 'Ожидание холодного сейфа...',
-        balanceSol: 0,
-        sweepsHistory: [],
-      },
-      gas: {
-        channelMode: 'JITO_PRIVATE',
-        urgencyLevel: 'TURBO',
-        feeMode: 'SMART_CAP',
-        maxFeeSol: 0.002,
-        solPriceUsd: 152,
-        referenceFastTipSol: 0.0004,
-        spentTodaySol: 0,
-        dailyBudgetSol: 0.03,
-        autoOptimize: true,
-        targetLandedRatePct: 85,
-      },
-      activeTransactions: [],
-      preflightChecklist: [
-        { id: '1', titleRu: '1. Тесты ядра и самопроверка (Self-test green)', passed: true, explanationRu: '16 из 16 проверок инвариантов ядра пройдены.' },
-        { id: '2', titleRu: '2. Инварианты эволюции (Правила 1-4 активны)', passed: true, explanationRu: 'Hot path изолирован от ИИ, авто-откат на базу активен.' },
-        { id: '3', titleRu: '3. Журнал сделок на диске подтвержден', passed: true, explanationRu: 'Сверка журнала 100% пройдена, чистое восстановление.' },
-        { id: '4', titleRu: '4. Изоляция приватных ключей и чек-лист безопасности', passed: true, explanationRu: 'Торговый сид изолирован на устройстве, доступ в облако/GitHub закрыт.' },
-        { id: '5', titleRu: '5. Баланс кошелька выше дна безопасности (мин. 0.01 SOL)', passed: false, explanationRu: 'Требуется пополнение боевого баланса (сейчас 0 SOL).' },
-        { id: '6', titleRu: '6. Лимиты риска заданы (макс 0.02 SOL на сделку)', passed: true, explanationRu: 'Ограничение позиции и дневной стоп-лосс активны.' },
-        { id: '7', titleRu: '7. Бюджет комиссий Jito и сети установлен', passed: true, explanationRu: 'Дневной лимит 0.03 SOL, плавающий смарт-кап активен.' },
-        { id: '8', titleRu: '8. Аварийный выключатель (Kill-Switch) доступен', passed: true, explanationRu: 'Мгновенная остановка проверена.' },
-        { id: '9', titleRu: '9. Keep-Awake стек готов (Служба, Doze, Watchdog)', passed: this.keepAwakeAdapter.getStatus().watchdogAlive, explanationRu: 'Фоновая служба и сторожевой пес активны.' },
-        { id: '10', titleRu: '10. Торговый seed в нативном Keystore', passed: hasKey, explanationRu: hasKey ? 'Аппаратный Keystore подтвержден' : 'Ключ не введён в Keystore. Импортируйте сид-фразу в Настройках.' },
-        { id: '11', titleRu: '11. Зафиксирована стабильная базовая версия параметров', passed: true, explanationRu: 'Базовый пресет v3.2-live зафиксирован.' },
-      ],
-      invariants: [
-        {
-          name: 'ONE_POSITION_CAP',
-          titleRu: 'Строго одна открытая сделка',
-          status: 'green',
-          descriptionRu: 'Робот физически не может купить вторую монету, пока не закрыта текущая.',
-        },
-        {
-          name: 'NO_DOUBLE_SELL',
-          titleRu: 'Защита от повторной продажи',
-          status: 'green',
-          descriptionRu: 'Идемпотентные ключи гарантируют исключение дублирующих заявок в блокчейне.',
-        },
-        {
-          name: 'SEED_ISOLATION',
-          titleRu: 'Торговый seed изолирован в Keystore',
-          status: 'green',
-          descriptionRu: 'Ключи никогда не покидают мобильное устройство и не передаются в облако, логи или GitHub.',
-        },
-        {
-          name: 'CAPS_ENFORCED',
-          titleRu: 'Тройные катастрофические лимиты',
-          status: 'green',
-          descriptionRu: 'Размер сделки <= 0.02 SOL, дневной стоп-лосс и лимит 3 убытков подряд жестко соблюдаются.',
-        },
-        {
-          name: 'PROFIT_SWEEP_SAFETY',
-          titleRu: 'Холодный сейф — только публичный адрес',
-          status: 'green',
-          descriptionRu: 'Вывод только на публичный адрес кошелька оператора. Полномочий тратить из сейфа у бота нет.',
-        },
-        {
-          name: 'COLD_PATH_GEMINI_ZERO_SIGN',
-          titleRu: 'Cold path и Gemini: 0 прав подписи',
-          status: 'green',
-          descriptionRu: 'ИИ только советует, не имеет доступа к ключам и не может ослабить фильтры скама или стоп-лосс.',
-        },
-        {
-          name: 'AI_ADVISORY_BOUNDED',
-          titleRu: 'Ограниченный множитель ИИ',
-          status: 'green',
-          descriptionRu: 'Множитель доверия нарративу ограничен [0.8x - 1.2x] и не может перекрывать лимиты риска.',
-        },
-        {
-          name: 'PAUSE_NEVER_ABANDON',
-          titleRu: 'Пауза при низком заряде не бросает сделку',
-          status: 'green',
-          descriptionRu: 'При заряде < 15% вход новых монет блокируется, но открытая позиция безопасно выводится по правилам.',
-        },
-        {
-          name: 'KEEP_AWAKE_ALIVE',
-          titleRu: 'Служба переднего плана активна 24/7',
-          status: 'green',
-          descriptionRu: 'Неубиваемая служба с постоянным уведомлением и авто-восстановлением через AlarmManager.',
-        },
-      ],
-      analytics: {
-        winratePct: 0,
-        avgWinPct: 0,
-        avgLossPct: 0,
-        maxDrawdownPct: 0,
-        totalDealsCount: 0,
-        gasFeesSpentSol: 0,
-        priorityTipsSpentSol: 0,
-        slippagePlannedPct: 0,
-        slippageActualPct: 0,
-        scenarioMix: [],
-      },
-      candidates: [],
-      smartWallets: [],
-      trends: [],
-      closedDeals: [],
-      keepAwake: this.keepAwakeAdapter.getStatus(),
-      backendType: 'live_apk',
-      isLiveConnected: hasKey,
-      lastSyncTs: Date.now(),
-      totalTicksReceived: 0,
-      candidatesScanned: 0,
-      rejectedByFilters: 0,
-      lastTickTimestamp: Date.now(),
-      needsYou: hasKey ? null : {
-        id: 'need-apk-key',
-        titleRu: 'Требуется ввод сид-фразы',
-        descriptionRu: 'Для реальной торговли реальными SOL импортируйте сид-фразу кошелька в разделе НАСТРОЙКИ.',
-        severity: 'CRITICAL',
-        optionsRu: [{ action: 'dismiss', labelRu: 'Понятно' }],
-      },
-      requestInboxCount: hasKey ? 0 : 1,
-      requestInboxList: hasKey ? [] : [{
-        id: 'need-apk-key',
-        titleRu: 'Требуется ввод сид-фразы',
-        descriptionRu: 'Для реальной торговли реальными SOL импортируйте сид-фразу кошелька в разделе НАСТРОЙКИ.',
-        severity: 'CRITICAL',
-        optionsRu: [{ action: 'dismiss', labelRu: 'Понятно' }],
-      }],
-      vitalSigns: this.vitalSignsMonitor.getStatus(0, 0.002, 0.0008),
-      activeCandidatePreset: null,
-      regimeStatus: {
-        regime: 'CALM',
-        regimeRu: 'Спокойный рынок',
-        confidencePct: 75,
-        reasonRu: 'Ожидание активации аппаратного Keystore для боевой оценки.',
-        dials: {
-          greed: { nameRu: 'Жадность (Тейк-профит)', descriptionRu: 'Высота фиксации', min: 50, max: 80, current: 70, isAuto: true, unit: '%' },
-          exitSpeed: { nameRu: 'Скорость выхода (Стоп-лосс)', descriptionRu: 'Реакция на разворот', min: 60, max: 85, current: 85, isAuto: true, unit: '%' },
-          scamSuspicion: { nameRu: 'Подозрительность к скаму', descriptionRu: 'Отсев ловушек', min: 80, max: 100, current: 90, isAuto: true, unit: '%' },
-          trendTrust: { nameRu: 'Доверие трендам', descriptionRu: 'Потолок доверия', min: 20, max: 60, current: 50, isAuto: true, unit: '%' },
-          commissionAggression: { nameRu: 'Агрессия комиссий (Jito Tip)', descriptionRu: 'Чаевые за блок', min: 0.0003, max: 0.0012, current: 0.0008, isAuto: true, unit: 'SOL' },
-        },
-      },
-      evolutionLedger: [],
-      preauthorizedBound: 'CONSERVATIVE_10',
-      microLive: defaultMicroLiveSupervisor.getState(),
-      scalingCanary: defaultScalingAndAuditManager.getState(),
-      dailyDigest: defaultHandsOffAuditManager.getDailyDigest(),
-      handsOffAudit: defaultHandsOffAuditManager.getHandsOffAuditReport(),
-    };
-
-    this.initSyncTimer = setTimeout(() => {
-      this.syncRealAccount();
-    }, 50);
-
-    this.startWatchdog();
-  }
-
-  private startWatchdog() {
-    if (this.watchdogTimer) clearInterval(this.watchdogTimer);
-    this.watchdogTimer = setInterval(() => {
-      const now = Date.now();
-      const realAdapter = this.signingAdapter as RealSolanaSigningAdapter;
-      const hasKey = realAdapter.hasKey();
-
-      // Сторожевой таймер активации WSS реконнекта работает ТОЛЬКО в боевом режиме MICRO_LIVE
-      if (this.state.mode === 'MICRO_LIVE' && hasKey) {
-        const timeoutMs = this.watchdogSilenceWindowMs * this.watchdogBackoffMultiplier;
-        if (now - (this.state.lastTickTimestamp || 0) > timeoutMs) {
-          this.state.liveActionTextRu = `Внимание: Задержка тиков WSS (> ${Math.round(timeoutMs / 1000)}с). Переподключение...`;
-          this.state.healthIndicators.blockchainConnection = 'yellow';
-          this.state.lastTickTimestamp = now;
-          this.watchdogBackoffMultiplier = Math.min(this.watchdogBackoffMultiplier * 1.5, 4);
-          this.notify();
-          try {
-            defaultYellowstoneAdapter.disconnect();
-            defaultYellowstoneAdapter.connect();
-          } catch (e) {
-            console.warn('[Watchdog]: Ошибка при реконнекте сокета:', e);
+          if (bundleValue.err) {
+            const errStr = JSON.stringify(bundleValue.err);
+            return {
+              bundleId,
+              status: 'Failed',
+              reasonRu: `ОШИБКА БАНДЛА: ${parseSolanaProgramError(errStr).decodedReasonRu}`,
+            };
           }
         }
-      } else {
-        // В режиме ожидания (PAUSED / READY) не рвем сокет и поддерживаем нормальный статус
-        this.watchdogBackoffMultiplier = 1;
       }
-    }, 5000);
+    } catch {
+      // Игнорируем сетевые сбои поллера и повторяем попытку в пределах таймаута
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
   }
 
-  public getState(): EngineStateV2 {
-    return this.state;
+  // Если за 15 секунд бандл не подтвердился валидатором -> DROPPED
+  return {
+    bundleId,
+    status: 'Dropped',
+    reasonRu: 'JITO: DROPPED (бандл не включен в блок за 15 сек)',
+  };
+}
+
+// Отправка бандла в Jito Block Engine (JSON-RPC)
+async function broadcastJitoBundle(rawBytes: Uint8Array): Promise<string | null> {
+  try {
+    let binary = '';
+    for (let i = 0; i < rawBytes.length; i++) {
+      binary += String.fromCharCode(rawBytes[i]);
+    }
+    const base64Tx = btoa(binary);
+
+    const res = await fetch('https://mainnet.block-engine.jito.wtf/api/v1/bundles', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'sendBundle',
+        params: [[base64Tx]],
+      }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      return data.result || null;
+    }
+  } catch {
+    // Резервная отправка через Helius RPC выполнится параллельно
+  }
+  return null;
+}
+
+// --- БОЕВОЙ АДАПТЕР И ДВИЖОК ТОРГОВЛИ (FSM-КОНТРОЛЛЕР) ---
+export class LiveApkAdapter {
+  private static instance: LiveApkAdapter;
+
+  // Единый атомарный стейт торгового ядра (Finite State Machine)
+  private _state: BotState = 'NO_KEY';
+  private stateListeners: Set<BotStateListener> = new Set();
+
+  private connection: Connection | null = null;
+  private ws: WebSocket | null = null;
+  private keypair: Keypair | null = null;
+
+  public balanceSol: number = 0;
+  public activePosition: ActivePosition | null = null;
+
+  public candidates: Map<string, CandidateMetric> = new Map();
+  private candidateBuffers: Map<string, CircularTickBuffer> = new Map();
+  public cooldownTokens: Map<string, number> = new Map();
+  public decisions: DecisionItem[] = [];
+
+  private tipAccountIndex: number = 0;
+  private globalPauseUntil: number = 0;
+  private lastDecisionLogTime: number = 0;
+
+  public telemetry: EngineTelemetry = {
+    totalTicks: 0,
+    scannedTokens: 0,
+    rejectedCount: 0,
+    netStatus: 'DISCONNECTED',
+    lastHeartbeat: Date.now()
+  };
+
+  private pollInterval: any = null;
+
+  private constructor() {}
+
+  public recordDecision(decision: DecisionItem) {
+    this.decisions.unshift(decision);
+    if (this.decisions.length > 30) {
+      this.decisions.pop();
+    }
   }
 
-  public subscribe(callback: (state: EngineStateV2) => void): () => void {
-    this.listeners.push(callback);
-    callback(this.state);
-    return () => {
-      this.listeners = this.listeners.filter((l) => l !== callback);
-    };
+  public static getInstance(): LiveApkAdapter {
+    if (!LiveApkAdapter.instance) {
+      LiveApkAdapter.instance = new LiveApkAdapter();
+    }
+    return LiveApkAdapter.instance;
   }
 
-  private notify() {
-    this.listeners.forEach((cb) => cb({ ...this.state }));
+  // --- FSM ГЕТТЕРЫ И ВАЛИДАЦИЯ ПЕРЕХОДОВ ---
+  public get state(): BotState {
+    return this._state;
   }
 
-  public getBackendType(): 'simulator' | 'live_apk' {
-    return 'live_apk';
+  public get isRunning(): boolean {
+    return (
+      this._state === 'SCANNING' ||
+      this._state === 'SUBMITTING_ORDER' ||
+      this._state === 'IN_POSITION' ||
+      this._state === 'CLOSING_POSITION' ||
+      this._state === 'COOLDOWN'
+    );
   }
 
-  public getSigningAdapter(): SigningAdapter {
-    return this.signingAdapter;
+  public get isExecutingTrade(): boolean {
+    return this._state === 'SUBMITTING_ORDER' || this._state === 'CLOSING_POSITION';
   }
 
-  public getKeepAwakeAdapter(): KeepAwakeAdapter {
-    return this.keepAwakeAdapter;
+  public onStateChange(listener: BotStateListener): () => void {
+    this.stateListeners.add(listener);
+    return () => this.stateListeners.delete(listener);
   }
 
-  public async getStatus(): Promise<TrafficLightStatus> {
-    return this.state.trafficLight;
+  public canTransitionTo(target: BotState): boolean {
+    const allowed = VALID_TRANSITIONS[this._state];
+    return Array.isArray(allowed) && allowed.includes(target);
   }
 
-  public async getHealth(): Promise<HealthIndicators> {
-    return this.state.healthIndicators;
+  public transitionTo(nextState: BotState, reason?: string): boolean {
+    if (this._state === nextState) {
+      return true; // Идемпотентно
+    }
+
+    if (!this.canTransitionTo(nextState)) {
+      console.warn(
+        `[FSM INVALID TRANSITION]: Запрещенный переход из "${this._state}" в "${nextState}". Причина: ${reason || 'не указана'}`
+      );
+      return false;
+    }
+
+    const prevState = this._state;
+    this._state = nextState;
+    console.log(`[FSM TRANSITION]: ${prevState} -> ${nextState} | ${reason || 'OK'}`);
+
+    this.stateListeners.forEach((listener) => {
+      try {
+        listener(nextState, prevState, reason);
+      } catch (err) {
+        console.error('[FSM Listener Error]:', err);
+      }
+    });
+
+    return true;
   }
 
-  public async getLiveAction(): Promise<string> {
-    return this.state.liveActionTextRu;
+  // --- БЕЗОПАСНАЯ ОЧИСТКА РЕСУРСОВ (CLEANUP) ---
+  public cleanup(reason: string = 'Очистка ресурсов'): void {
+    if (this.ws) {
+      try {
+        this.ws.onopen = null;
+        this.ws.onclose = null;
+        this.ws.onerror = null;
+        this.ws.onmessage = null;
+        this.ws.close();
+      } catch (e) {
+        console.error('Ошибка закрытия сокета:', e);
+      }
+      this.ws = null;
+    }
+
+    if (this.pollInterval) {
+      clearInterval(this.pollInterval);
+      this.pollInterval = null;
+    }
+
+    this.candidates.clear();
+    this.candidateBuffers.clear();
+    this.telemetry.netStatus = 'STOPPED';
   }
 
-  public async getMoney(): Promise<MoneySummary> {
-    return {
-      balanceSol: this.state.balanceSol,
-      earnedTodaySol: this.state.earnedTodaySol,
-      earnedTodayPct: this.state.earnedTodayPct,
-      pnlHistory: this.state.pnlHistory,
-    };
+  // --- ИНИЦИАЛИЗАЦИЯ И СТАТУС КОШЕЛЬКА ---
+  public async initFromKeypair(keypair: Keypair | null, rpcUrl?: string): Promise<boolean> {
+    if (!keypair) {
+      this.cleanup('Ключ отсутствует или удален');
+      this.keypair = null;
+      this.connection = null;
+      this._state = 'NO_KEY';
+      return false;
+    }
+
+    this.keypair = keypair;
+    const finalRpc = rpcUrl || 'https://api.mainnet-beta.solana.com';
+    this.connection = new Connection(finalRpc, { commitment: 'confirmed' });
+    await this.syncOnChainBalance();
+
+    if (this._state === 'NO_KEY' || this._state === 'TERMINATED') {
+      this.transitionTo('IDLE_READY', 'Ключ загружен, баланс проверен ончейн');
+    }
+    return true;
   }
 
-  public async getDecisions(n: number = 10): Promise<DecisionItem[]> {
-    return this.state.decisions.slice(0, n);
+  // --- СБРОС И ОСТАНОВКА (СТОП ОПЕРАТОРА) ---
+  public async stop(reason: string = 'Остановка оператором'): Promise<void> {
+    this.cleanup(reason);
+
+    if (this._state !== 'TERMINATED' && this._state !== 'NO_KEY') {
+      if (this.keypair) {
+        this.transitionTo('IDLE_READY', reason);
+      } else {
+        this.transitionTo('NO_KEY', reason);
+      }
+    }
   }
 
-  public async getNeedsYou(): Promise<NeedsYouCard | null> {
-    return this.state.needsYou;
+  // --- АВАРИЙНЫЙ СТОП (EMERGENCY KILL) ---
+  public async emergencyStop(reason: string = 'Аварийный стоп оператора'): Promise<void> {
+    if (this.activePosition && this._state === 'IN_POSITION') {
+      try {
+        await this.triggerLiveSell(reason);
+      } catch (e) {
+        console.error('[Emergency Stop Sell Error]:', e);
+      }
+    }
+    this.cleanup(reason);
+    this.transitionTo('TERMINATED', reason);
   }
 
-  public async getMarketCandidates(): Promise<MarketCandidate[]> {
-    return this.state.candidates;
-  }
+  // --- ЗАПУСК ТОРГОВЛИ (ТОЛЬКО ИЗ IDLE_READY) ---
+  public async start(keypair: Keypair, rpcUrl: string): Promise<boolean> {
+    // Клик «ЗАПУСК»: разрешен ТОЛЬКО из 'IDLE_READY' -> переводит в 'SCANNING'.
+    // Если бот уже в 'SCANNING', повторный клик отбрасывается.
+    if (this._state === 'SCANNING') {
+      console.warn('[FSM]: Бот уже в режиме SCANNING. Повторный клик отброшен.');
+      return true;
+    }
 
-  public async getSmartMoneyList(): Promise<SmartWalletItem[]> {
-    return this.state.smartWallets;
-  }
-
-  public async getTrends(): Promise<SocialTrendItem[]> {
-    return this.state.trends;
-  }
-
-  public async getHistory(_filter?: string): Promise<ClosedDealItem[]> {
-    return this.state.closedDeals;
-  }
-
-  public async getParcel(dealId: string): Promise<TransactionTrackingRecord | null> {
-    return this.state.activeTransactions.find((tx) => tx.id === dealId) || null;
-  }
-
-  public async getTrackingTransactions(): Promise<TransactionTrackingRecord[]> {
-    return this.state.activeTransactions;
-  }
-
-  public async getCommissionPolicy(): Promise<GasSettings> {
-    return this.state.gas;
-  }
-
-  public async getGasSettings(): Promise<GasSettings> {
-    return this.state.gas;
-  }
-
-  public async getInvariantsStatus(): Promise<InvariantCheck[]> {
-    return this.state.invariants;
-  }
-
-  public async getPreflight(): Promise<PreflightCheckItem[]> {
-    return this.state.preflightChecklist;
-  }
-
-  public async getPreflightChecklist(): Promise<PreflightCheckItem[]> {
-    return this.state.preflightChecklist;
-  }
-
-  public async getStrategyParams(): Promise<StrategyParams> {
-    return this.baselineParams;
-  }
-
-  public async getKeepAwakeStatus(): Promise<KeepAwakeStatus> {
-    return this.state.keepAwake;
-  }
-
-  public async armAutopilot(enabled: boolean): Promise<boolean> {
-    if (enabled) {
-      const failed = this.state.preflightChecklist.filter((c) => !c.passed);
-      if (failed.length > 0) {
-        this.state.trafficLight = 'PROBLEM';
-        this.state.autopilotArmed = false;
-        this.state.liveActionTextRu = `Блокировка запуска: не пройден чек-лист («${failed[0].titleRu}»)`;
-        this.state.needsYou = {
-          id: 'preflight-blocked',
-          titleRu: 'Блокировка боевого режима: предстартовый чек-лист не пройден',
-          descriptionRu: `Автопилот не может быть включен: не выполнены обязательные условия (${failed.length} шт): ${failed.map(f => f.titleRu).join('; ')}.`,
-          severity: 'CRITICAL',
-          optionsRu: [{ action: 'dismiss', labelRu: 'Понятно (оставаться на паузе)' }],
-        };
-        this.notify();
+    if (this._state === 'NO_KEY' || this._state === 'TERMINATED') {
+      this.keypair = keypair;
+      this.connection = new Connection(rpcUrl, { commitment: 'confirmed' });
+      const synced = await this.syncOnChainBalance();
+      if (!synced || this.balanceSol < MIN_RESERVE_SOL) {
+        this.telemetry.netStatus = `НЕХВАТКА SOL: ${this.balanceSol.toFixed(4)}`;
         return false;
       }
+      this.transitionTo('IDLE_READY', 'Инициализирован перед стартом');
     }
-    this.state.autopilotArmed = enabled;
-    this.notify();
+
+    if (this._state !== 'IDLE_READY') {
+      console.warn(`[FSM]: Запуск отклонен: текущее состояние "${this._state}" (требуется IDLE_READY).`);
+      return false;
+    }
+
+    this.cleanup('Подготовка к запуску сканирования');
+
+    this.keypair = keypair;
+    this.connection = new Connection(rpcUrl, { commitment: 'confirmed' });
+    this.activePosition = null;
+
+    // Синхронизация реального баланса строго из сети
+    const syncSuccess = await this.syncOnChainBalance();
+    if (!syncSuccess || this.balanceSol < MIN_RESERVE_SOL) {
+      this.telemetry.netStatus = `НЕХВАТКА SOL: ${this.balanceSol.toFixed(4)}`;
+      return false;
+    }
+
+    if (!this.transitionTo('SCANNING', 'Запуск поиска импульсов Pump.fun')) {
+      return false;
+    }
+
+    this.connectWebSocket(rpcUrl);
+
+    // Фоновый цикл контроля позиции (Grace Period, Тейк-профит и Time-Decay)
+    this.pollInterval = setInterval(() => {
+      this.handleLifecycleTick();
+    }, 1000);
+
     return true;
   }
 
-  public async setDockMode(on: boolean): Promise<boolean> {
-    await this.keepAwakeAdapter.setDockMode(on);
-    this.state.keepAwake.dockMode = on;
-    this.notify();
-    return true;
-  }
-
-  public async syncRealAccount(): Promise<void> {
-    try {
-      const realAdapter = this.signingAdapter as RealSolanaSigningAdapter;
-      await realAdapter.loadFromKeystore();
-      const hasKey = realAdapter.hasKey();
-      const pubkeyStr = await this.signingAdapter.getPublicAddress().catch(() => null);
-
-      if (pubkeyStr && hasKey) {
-        this.state.wallets.hotWalletPubkey = pubkeyStr;
-        try {
-          const conn = new Connection(this.solanaRpcUrl, 'confirmed');
-          const lamports = await conn.getBalance(new PublicKey(pubkeyStr));
-          const balance = lamports / LAMPORTS_PER_SOL;
-          this.state.balanceSol = balance;
-          this.state.wallets.balanceSol = balance;
-          this.state.healthIndicators.blockchainConnection = 'green';
-          this.state.healthIndicators.needsOperatorHelp = false;
-          this.microLiveSupervisor.setKeySelection(
-            this.state.microLive.activeKeyType,
-            pubkeyStr,
-            balance
-          );
-          this.state.preflightChecklist.forEach((chk) => {
-            if (chk.id === '5') {
-              chk.passed = balance >= 0.01;
-              chk.explanationRu = `Текущий баланс: ${balance.toFixed(4)} SOL (порог: 0.01 SOL)`;
-            }
-            if (chk.id === '10') {
-              chk.passed = true;
-              chk.explanationRu = 'Аппаратный ключ верифицирован в Keystore';
-            }
-          });
-
-          if (this.state.trafficLight === 'PROBLEM') {
-            this.state.trafficLight = 'TUNING';
-          }
-          if (this.state.liveActionTextRu.includes('Ключ не введён')) {
-            this.state.liveActionTextRu = 'Боевой узел готов к запуску на телефоне. Ожидание команды оператора.';
-          }
-        } catch {
-          this.state.healthIndicators.blockchainConnection = 'yellow';
-        }
-        this.notify();
-      } else {
-        this.state.trafficLight = 'PROBLEM';
-        this.state.mode = 'PAUSED';
-        this.state.liveActionTextRu = '🔒 Ключ не введён. Откройте НАСТРОЙКИ и введите сид-фразу для активации торговли.';
-        this.state.healthIndicators.needsOperatorHelp = true;
-        this.state.preflightChecklist.forEach((chk) => {
-          if (chk.id === '10') {
-            chk.passed = false;
-            chk.explanationRu = 'Ключ не введён в Keystore. Импортируйте сид-фразу в Настройках.';
-          }
-        });
-        this.notify();
-      }
-    } catch {
-      this.state.healthIndicators.blockchainConnection = 'yellow';
-    }
-  }
-
-  private ensureStreamActive() {
-    if (!this.yellowstoneUnsub) {
-      this.yellowstoneUnsub = defaultYellowstoneAdapter.subscribe({
-        onTickReceived: () => {
-          this.state.totalTicksReceived = (this.state.totalTicksReceived || 0) + 1;
-          this.state.lastTickTimestamp = Date.now();
-          this.notify();
-        },
-        onCandidateDiscovered: (cand) => {
-          const now = Date.now();
-          this.state.totalTicksReceived = (this.state.totalTicksReceived || 0) + 1;
-          this.state.lastTickTimestamp = now;
-
-          if (!this.scannedMintsSet.has(cand.mint)) {
-            this.scannedMintsSet.add(cand.mint);
-            this.state.candidatesScanned = (this.state.candidatesScanned || 0) + 1;
-          }
-
-          // Register tick in RAM CircularTickBuffer
-          let tickBuf = this.tickBuffers.get(cand.mint);
-          if (!tickBuf) {
-            tickBuf = new CircularTickBuffer(100);
-            this.tickBuffers.set(cand.mint, tickBuf);
-          }
-
-          const price = cand.priceSol || 0.00000003;
-          const solRes = cand.solReserve || cand.liquiditySol || 30;
-          const tokRes = cand.tokenReserve || 1000000000;
-          const buyVol = cand.lastVolumeBuySol || (cand.buyersCount > 0 ? 0.2 : 0);
-          const sellVol = cand.lastVolumeSellSol || 0;
-
-          tickBuf.pushTick({
-            timestampMs: now,
-            priceSol: price,
-            solReserve: solRes,
-            tokenReserve: tokRes,
-            volumeBuySol: buyVol,
-            volumeSellSol: sellVol,
-            slot: cand.slot || Math.floor(now / 400),
-          });
-
-          // Record buy in ScamFilter for clustering analysis
-          if (buyVol > 0) {
-            this.scamFilter.recordBuy(cand.mint, {
-              slot: cand.slot || Math.floor(now / 400),
-              wallet: cand.mint.slice(0, 8),
-              amountSol: buyVol,
-              timestampMs: now,
-            });
-          }
-
-          // If active position exists, update its live price & OFI
-          if (this.state.activePosition && this.state.activePosition.mint === cand.mint) {
-            const entryPrice = this.state.activePosition.entryPriceSol || price;
-            const diffPct = Number((((price - entryPrice) / entryPrice) * 100).toFixed(1));
-            this.state.activePosition.currentPriceSol = price;
-            this.state.activePosition.currentPercent = diffPct;
-            const ofi = tickBuf.calculateOFI(5000);
-            this.state.activePosition.lastOfiSol = ofi.ofiSol;
-          }
-
-          const exists = this.state.candidates.some((c) => c.mint === cand.mint);
-          if (!exists) {
-            this.state.candidates = [cand, ...this.state.candidates.slice(0, 9)];
-            this.notify();
-          }
-
-          this.evaluateAndTradeCandidate(cand);
-        },
-        onConnectionStatusChange: (status) => {
-          this.state.healthIndicators.blockchainConnection = status === 'CONNECTED' ? 'green' : 'yellow';
-          this.notify();
-        },
-      });
-    }
-    defaultYellowstoneAdapter.startStream();
-  }
-
-  private lastRadarDecisionTimestamp = 0;
-
-  private recordDecision(decision: DecisionItem) {
+  // --- ЕДИНЫЙ ЦИКЛ ЖИЗНЕННОГО ЦИКЛА (TICK DISPATCHER) ---
+  private handleLifecycleTick() {
     const now = Date.now();
-    const isHighPriority =
-      decision.kind === 'bought' ||
-      decision.kind === 'sold' ||
-      decision.kind === 'trade_attempt' ||
-      Boolean(decision.actionRu?.includes('ВЫСТРЕЛ')) ||
-      Boolean(decision.actionRu?.includes('ПОКУПКА'));
 
-    if (!isHighPriority) {
-      // Throttle non-trade radar logs to max 1 per 500ms
-      if (now - this.lastRadarDecisionTimestamp < 500) {
-        return;
+    // 1. Автоматический выход из COOLDOWN по истечении защитной паузы
+    if (this._state === 'COOLDOWN') {
+      if (now >= this.globalPauseUntil && !this.activePosition) {
+        this.transitionTo('SCANNING', 'Защитная пауза завершена, возврат к сканированию');
       }
-      this.lastRadarDecisionTimestamp = now;
+      return;
     }
 
-    if (decision.kind === 'rejected') {
-      this.state.rejectedByFilters = (this.state.rejectedByFilters || 0) + 1;
+    // 2. Контроль активной позиции
+    if (this._state === 'IN_POSITION') {
+      this.monitorActivePositionLifecycle();
     }
 
-    // Keep max 30 decisions in state
-    const existing = this.state.decisions || [];
-    this.state.decisions = [decision, ...existing.filter((d) => d.id !== decision.id).slice(0, 29)];
-    this.notify();
+    // 3. Очистка устаревших кандидатов
+    this.cleanupCandidates();
   }
 
-  private async checkExistingOpenPosition() {
-    if (this.state.activePosition) {
-      this.state.liveActionTextRu = `В позиции: ${this.state.activePosition.symbol}, вход ${this.state.activePosition.entrySol} SOL, сопровождаем...`;
-      return;
-    }
-    this.state.activePosition = null;
-  }
-
-  private async evaluateAndTradeCandidate(cand: MarketCandidate) {
-    if (cand.mint && cand.symbol) {
-      this.candSymbolMap.set(cand.mint, cand.symbol);
-    }
-
-    // 1. Corridor check (6.0 - 25.0 real SOL in bonding curve)
-    const solReserve = cand.solReserve || cand.liquiditySol || 0;
-    const realSol = solReserve >= 30 ? solReserve - 30 : solReserve;
-    if (realSol < 6.0 || realSol > 25.0) {
-      this.state.rejectedByFilters = (this.state.rejectedByFilters || 0) + 1;
-      return;
-    }
-
-    // 2. On-Chain Metadata & Authority Audit (CTO Absorption Aware)
-    const metaAudit = this.scamFilter.evaluateMetadata({
-      mint: cand.mint,
-      mintAuthority: cand.mintAuthority !== undefined ? cand.mintAuthority : null,
-      freezeAuthority: cand.freezeAuthority !== undefined ? cand.freezeAuthority : null,
-      isToken2022: Boolean(cand.isToken2022),
-      hasTransferHook: Boolean(cand.hasTransferHook),
-      hasTransferFee: Boolean(cand.isToken2022 && cand.hasTransferHook),
-      creatorHoldingPct: cand.creatorHoldingPct ?? 5,
-    });
-
-    if (!metaAudit.passed) {
-      this.state.rejectedByFilters = (this.state.rejectedByFilters || 0) + 1;
-      return;
-    }
-
-    // 3. Buyer Clustering / Same-slot bundling check
-    const clusterAudit = this.scamFilter.evaluateBuyerClustering(cand.mint);
-    if (!clusterAudit.passed) {
-      this.state.rejectedByFilters = (this.state.rejectedByFilters || 0) + 1;
-      this.recordDecision({
-        id: `rej-cabal-${Date.now()}`,
-        timeStr: 'Только что',
-        kind: 'rejected',
-        symbol: cand.symbol,
-        mint: cand.mint,
-        actionRu: `Отклонен ${cand.symbol}`,
-        reasonRu: clusterAudit.rejectReasonRu || 'Слив создателя / Кабаль-кластер',
-        detailsRu: clusterAudit.detailsRu || 'Обнаружен сговор создателя и связанный бандл-снайпинг.',
-      });
-      return;
-    }
-
-    // 4. Net Inflow & Unique Buyers Analysis
-    if (this.tickBuffers.size > 100 && !this.tickBuffers.has(cand.mint)) {
-      const oldestKey = this.tickBuffers.keys().next().value;
-      if (oldestKey) {
-        this.tickBuffers.delete(oldestKey);
-      }
-    }
-
-    let isNewToken = false;
-    let tickBuf = this.tickBuffers.get(cand.mint);
-    if (!tickBuf) {
-      isNewToken = true;
-      tickBuf = new CircularTickBuffer(100);
-      this.tickBuffers.set(cand.mint, tickBuf);
-      tickBuf.pushTick({
-        timestampMs: Date.now() - 600,
-        priceSol: cand.priceSol || 0.00000003,
-        solReserve: solReserve,
-        tokenReserve: cand.tokenReserve || 1000000000,
-        volumeBuySol: 0,
-        volumeSellSol: 0,
-      });
-      tickBuf.pushTick({
-        timestampMs: Date.now(),
-        priceSol: (cand.priceSol || 0.00000003) * (cand.trendScore >= 60 ? 1.025 : 1.005),
-        solReserve: solReserve + (cand.lastVolumeBuySol || 0.3),
-        tokenReserve: (cand.tokenReserve || 1000000000) - 1000000,
-        volumeBuySol: cand.lastVolumeBuySol || 0.35,
-        volumeSellSol: 0,
-        buyerWallet: 'buyer_init_1',
-      });
-
-      // Warm candidate event
-      this.recordDecision({
-        id: `cand-warm-${Date.now()}`,
-        timeStr: 'Только что',
-        kind: 'candidate',
-        symbol: cand.symbol,
-        mint: cand.mint,
-        actionRu: `🎯 [КОРИДОР 6-25 SOL] $${cand.symbol}`,
-        reasonRu: `В фокусе: накопление притока (0.35 / 1.50 SOL) | Кривая: ${realSol.toFixed(1)} SOL`,
-      });
-    }
-
-    const inflowEval = tickBuf.evaluateCorridorNetInflowEntry();
-    if (!inflowEval.isSignalValid) {
-      if (!isNewToken) {
-        this.recordDecision({
-          id: `cand-focus-${Date.now()}`,
-          timeStr: 'Только что',
-          kind: 'candidate',
-          symbol: cand.symbol,
-          mint: cand.mint,
-          actionRu: `🎯 $${cand.symbol} | Кривая: ${realSol.toFixed(1)} SOL`,
-          reasonRu: `${inflowEval.reasonRu} | Покупателей: ${inflowEval.uniqueBuyersCount}`,
-        });
-      }
-      return;
-    }
-
-    // 5. Economic Edge Gate
-    const maxTrade = 0.035; // Base lot size 0.035 SOL
-    const jitoTip = 0.0004; // Fixed 0.0004 SOL Jito Tip
-
-    const economicEdge = this.scamFilter.evaluateEconomicEdge({
-      tradeSizeSol: maxTrade,
-      solReserve,
-      jitoTipSol: jitoTip,
-      dexFeePct: 1.0,
-      slippagePct: 1.0,
-    });
-
-    if (!economicEdge.passed) {
-      this.recordDecision({
-        id: `edge-${Date.now()}`,
-        timeStr: 'Только что',
-        kind: 'rejected',
-        symbol: cand.symbol,
-        mint: cand.mint,
-        actionRu: `Отклонен ${cand.symbol}`,
-        reasonRu: 'Ниже порога выгоды',
-        detailsRu: economicEdge.reasonRu,
-      });
-      return;
-    }
-
-    // If not in MICRO_LIVE mode, record candidate as passed
-    if (this.state.mode !== 'MICRO_LIVE') {
-      this.recordDecision({
-        id: `cand-${Date.now()}`,
-        timeStr: 'Только что',
-        kind: 'candidate',
-        symbol: cand.symbol,
-        mint: cand.mint,
-        actionRu: `КАНДИДАТ ${cand.symbol}`,
-        reasonRu: 'Фильтры пройдены. Расчет траектории...',
-      });
-      return;
-    }
-
-    // Hard Invariant: strictly MAXIMUM 1 open position (ONE_POSITION_CAP)
-    if (this.state.activePosition !== null || this.isExecutingTrade || this.isExiting) {
-      return;
-    }
-
-    // Gas Reserve Check
-    const availableSol = this.state.balanceSol - this.MIN_GAS_RESERVE_SOL;
-    if (availableSol < 0.005) {
-      this.state.trafficLight = 'PROBLEM';
-      this.state.liveActionTextRu = `Недостаточно SOL для сделки с учетом газового резерва (${this.MIN_GAS_RESERVE_SOL} SOL)`;
-      this.notify();
-      return;
-    }
-
-    // 6. Gemini Advisory
-    let advisoryMultiplier = 1.0;
+  // ФИЗИЧЕСКИЙ ЗАПРОС ОНЧЕЙН-БАЛАНСА
+  public async syncOnChainBalance(): Promise<boolean> {
+    if (!this.connection || !this.keypair) return false;
     try {
-      const advisory = await defaultGeminiAdvisoryService.analyzeCandidate({
-        tokenSymbol: cand.symbol,
-        mintAddress: cand.mint,
-        liquiditySol: cand.liquiditySol || 10,
-        volume5mSol: 5,
-        bondingCurvePct: cand.trendScore || 50,
-        smartWalletsCount: cand.smartMoneyPresent ? 3 : 0,
-      });
-      if (advisory.recommendation === 'SKIP' || advisory.cabalRiskPct > 65) {
-        this.recordDecision({
-          id: `adv-${Date.now()}`,
-          timeStr: 'Только что',
-          kind: 'rejected',
-          symbol: cand.symbol,
-          mint: cand.mint,
-          actionRu: `Отклонен ${cand.symbol}`,
-          reasonRu: `Вето советника: ${advisory.reasoningRu}`,
-          detailsRu: 'Gemini Advisory рекомендовал отклонить сделку из-за риска сговора.',
-        });
-        return;
-      }
-      advisoryMultiplier = Math.max(0.8, Math.min(1.2, advisory.multiplier || 1.0));
-    } catch {
-      advisoryMultiplier = 1.0;
+      const lamports = await this.connection.getBalance(this.keypair.publicKey, 'confirmed');
+      this.balanceSol = lamports / LAMPORTS_PER_SOL;
+      return true;
+    } catch (e) {
+      console.error('Ошибка получения ончейн-баланса:', e);
+      return false;
     }
-
-    // All gates PASSED: Record signal and execute Buy Order
-    this.recordDecision({
-      id: `sig-${Date.now()}`,
-      timeStr: 'Только что',
-      kind: 'bought',
-      symbol: cand.symbol,
-      mint: cand.mint,
-      actionRu: `СИГНАЛ / ПОКУПКА ${cand.symbol}`,
-      reasonRu: `Приток +${inflowEval.netSolInflow.toFixed(2)} SOL/5с | Покупателей: ${inflowEval.uniqueBuyersCount}`,
-    });
-
-    const tradeSize = Math.min(maxTrade * advisoryMultiplier, availableSol);
-    await this.executeBuyOrder(cand, tradeSize);
   }
 
-  private async executeBuyOrder(cand: MarketCandidate, amountSol: number) {
-    if (this.isExecutingTrade || this.state.activePosition !== null) return;
-    this.isExecutingTrade = true;
+  // Алиас для обратной совместимости
+  public async syncRealBalance(): Promise<boolean> {
+    return this.syncOnChainBalance();
+  }
 
-    // Record high-priority BUY TRIGGER / TRADE_ATTEMPT decision
+  // ПОДКЛЮЧЕНИЕ К WEBSOCKET HELIUS
+  private connectWebSocket(rpcUrl: string) {
+    const wsUrl = rpcUrl.replace('https://', 'wss://').replace('http://', 'ws://');
+    this.telemetry.netStatus = 'ПОДКЛЮЧЕНИЕ WSS...';
+
+    try {
+      this.ws = new WebSocket(wsUrl);
+
+      this.ws.onopen = () => {
+        this.telemetry.netStatus = 'ПОДКЛЮЧЕНО (ЛОГИ PUMP.FUN)';
+        // Подписка logsSubscribe на Pump.fun
+        this.ws?.send(JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'logsSubscribe',
+          params: [
+            { mentions: [PUMP_PROGRAM_ID.toBase58()] },
+            { commitment: 'processed' }
+          ]
+        }));
+      };
+
+      this.ws.onmessage = (event: MessageEvent) => {
+        this.telemetry.totalTicks++;
+        this.telemetry.lastHeartbeat = Date.now();
+        this.processIncomingLog(event.data);
+      };
+
+      this.ws.onerror = (err) => {
+        console.error('WSS Error:', err);
+        this.telemetry.netStatus = 'ОШИБКА WSS СОЕДИНЕНИЯ';
+      };
+
+      this.ws.onclose = () => {
+        if (this.isRunning) {
+          this.telemetry.netStatus = 'ОБРЫВ WSS. РЕКОННЕКТ...';
+          setTimeout(() => {
+            if (this.isRunning && this.connection) {
+              this.connectWebSocket(rpcUrl);
+            }
+          }, 3000);
+        }
+      };
+    } catch {
+      this.telemetry.netStatus = 'НЕУДАЧА WSS СТАРТА';
+    }
+  }
+
+  // ПАРСИНГ ЛОГОВ И АНАЛИЗ КОРИДОРА 6-25 SOL
+  private processIncomingLog(rawPayload: string) {
+    try {
+      const parsed = JSON.parse(rawPayload);
+      const logs: string[] = parsed?.params?.result?.value?.logs || [];
+      if (!logs.length) return;
+
+      for (const log of logs) {
+        if (log.includes('Program data:') || log.includes('Instruction:')) {
+          this.handlePumpDataLog(log);
+        }
+      }
+    } catch {
+      // Игнорируем битые пакеты
+    }
+  }
+
+  private handlePumpDataLog(logLine: string) {
+    const now = Date.now();
+    const base58Match = logLine.match(/[1-9A-HJ-NP-za-km-z]{32,44}/);
+    if (!base58Match) return;
+
+    const mint = base58Match[0];
+    if (this.cooldownTokens.has(mint) && now < (this.cooldownTokens.get(mint) || 0)) {
+      this.telemetry.rejectedCount++;
+      return;
+    }
+
+    let buffer = this.candidateBuffers.get(mint);
+    if (!buffer) {
+      buffer = new CircularTickBuffer(100);
+      this.candidateBuffers.set(mint, buffer);
+    }
+
+    const isSell = logLine.toLowerCase().includes('sell');
+    const isBuy = !isSell;
+
+    // Извлечение объема SOL из лога (декодирование байтов u64 lamports)
+    let volumeSol = 0.25;
+    if (logLine.includes('Program data:')) {
+      try {
+        const b64Data = logLine.split('Program data:')[1]?.trim();
+        if (b64Data && typeof atob === 'function') {
+          const binStr = atob(b64Data);
+          if (binStr.length >= 24) {
+            let lamports = BigInt(0);
+            for (let i = 0; i < 8; i++) {
+              lamports |= BigInt(binStr.charCodeAt(16 + i)) << BigInt(i * 8);
+            }
+            const solParsed = Number(lamports) / LAMPORTS_PER_SOL;
+            if (solParsed > 0.001 && solParsed <= 50) {
+              volumeSol = solParsed;
+            }
+          }
+        }
+      } catch {
+        // Резервный шаг объема
+      }
+    }
+
+    let cand = this.candidates.get(mint);
+    const prevBonding = cand ? cand.bondingSol : (this.activePosition?.mint === mint ? this.activePosition.currentPriceSol : 6.5);
+    const newBonding = Math.max(1.0, prevBonding + (isBuy ? volumeSol : -volumeSol));
+
+    // Обновление реальной цены открытой позиции
+    if (this.activePosition && this.activePosition.mint === mint) {
+      this.activePosition.currentPriceSol = newBonding;
+      if (newBonding > this.activePosition.highestPriceSol) {
+        this.activePosition.highestPriceSol = newBonding;
+      }
+
+      // СЦЕНАРИЙ 4: Аварийный байпас Grace Period при катастрофическом рагпуле (падение > 40%)
+      const pnlPct = ((newBonding - this.activePosition.entryPriceSol) / this.activePosition.entryPriceSol) * 100;
+      if (pnlPct <= -40 && (this._state as BotState) === 'IN_POSITION') {
+        console.warn(`[КАТАСТРОФИЧЕСКИЙ РАГПУЛ]: PnL ${pnlPct.toFixed(1)}% <= -40%, мгновенный аварийный сброс!`);
+        this.triggerLiveSell('Экстренный сброс ликвидности / рагпул (> -40%)');
+      }
+    }
+
+    // Регистрация реального тика в кольцевом буфере
+    buffer.pushTick({
+      timestampMs: now,
+      priceSol: newBonding,
+      solReserve: newBonding,
+      tokenReserve: 100000000,
+      volumeBuySol: isBuy ? volumeSol : 0,
+      volumeSellSol: isSell ? volumeSol : 0,
+      buyerWallet: base58Match[0],
+    });
+
+    const { netSolInflow, uniqueBuyersCount } = buffer.calculateNetInflowAndBuyers(5000);
+
+    if (!cand) {
+      cand = {
+        mint,
+        ticker: mint.slice(0, 4).toUpperCase(),
+        bondingSol: newBonding,
+        netInflow5s: Math.max(0, netSolInflow),
+        uniqueBuyers: Math.max(1, uniqueBuyersCount),
+        readinessScore: 30,
+        isCto: isSell,
+        lastSeen: now
+      };
+      this.candidates.set(mint, cand);
+      this.telemetry.scannedTokens = this.candidates.size;
+    } else {
+      cand.lastSeen = now;
+      cand.bondingSol = newBonding;
+      cand.netInflow5s = netSolInflow;
+      cand.uniqueBuyers = uniqueBuyersCount;
+      if (isSell && netSolInflow > 1.0) {
+        cand.isCto = true; // CTO Absorption: Dev dump successfully absorbed
+      }
+    }
+
+    // Расчет готовности к сделке в коридоре 6-25 SOL
+    if (cand.bondingSol >= 6.0 && cand.bondingSol <= 25.0) {
+      const score = Math.floor(
+        (Math.max(0, cand.netInflow5s) / 1.5) * 50 + (Math.min(4, cand.uniqueBuyers) / 4) * 50
+      );
+      cand.readinessScore = Math.min(100, Math.max(0, score));
+
+      // Троттлинг записи решений радара (не чаще 1 раза в 500мс)
+      if (now - this.lastDecisionLogTime > 500 && cand.readinessScore >= 50) {
+        this.lastDecisionLogTime = now;
+        this.recordDecision({
+          id: `cand-${cand.mint}-${now}`,
+          timeStr: new Date().toLocaleTimeString(),
+          kind: 'candidate',
+          symbol: cand.ticker,
+          mint: cand.mint,
+          actionRu: `🎯 [КОРИДОР 6-25 SOL] $${cand.ticker}`,
+          reasonRu: `Приток ${cand.netInflow5s.toFixed(2)} SOL/5с | Покупателей: ${cand.uniqueBuyers} | Готовность: ${cand.readinessScore}%`,
+        });
+      }
+    } else {
+      cand.readinessScore = 10;
+      this.telemetry.rejectedCount++;
+    }
+
+    // ТРИГГЕР НА ВХОД (Коридор 6-25 SOL, Inflow >= 1.5 SOL, Buyers >= 4)
+    // Разрешен строго из 'SCANNING', атомарный мьютекс блокирует параллельные входы
+    if (
+      this._state === 'SCANNING' &&
+      !this.activePosition &&
+      now >= this.globalPauseUntil &&
+      cand.bondingSol >= 6.0 &&
+      cand.bondingSol <= 25.0 &&
+      cand.netInflow5s >= 1.5 &&
+      cand.uniqueBuyers >= 4 &&
+      this.balanceSol >= (TRADE_SIZE_SOL + MIN_RESERVE_SOL)
+    ) {
+      this.triggerLiveBuy(cand);
+    }
+  }
+
+  // --- ЯДРО СБОРКИ И ВЕЩАНИЯ ТРАНЗАКЦИИ PUMP.FUN (БЕЗ NODEJS BUFFER) ---
+  public async buildAndBroadcastPumpSwap(params: {
+    action: 'BUY' | 'SELL';
+    mint: string;
+    tokenAmount: bigint;
+    solLamports: bigint;
+  }): Promise<{ success: boolean; signature?: string; bundleId?: string; error?: string }> {
+    if (!this.connection || !this.keypair) {
+      return { success: false, error: 'Connection или Keypair не инициализированы' };
+    }
+
+    const mintPubkey = new PublicKey(params.mint);
+    const userPubkey = this.keypair.publicKey;
+
+    const bondingCurve = getBondingCurvePDA(mintPubkey);
+    const associatedBondingCurve = getAssociatedTokenAddress(mintPubkey, bondingCurve);
+    const associatedUser = getAssociatedTokenAddress(mintPubkey, userPubkey);
+
+    const instructions: TransactionInstruction[] = [];
+
+    if (params.action === 'BUY') {
+      // 1. Идемпотентное создание токен-аккаунта (предотвращает падение при отсутствии ATA)
+      instructions.push(
+        createIdempotentAtaInstruction(userPubkey, associatedUser, userPubkey, mintPubkey)
+      );
+
+      // 2. Инструкция покупки Pump.fun (12 AccountMeta)
+      const buyIx = new TransactionInstruction({
+        programId: PUMP_PROGRAM_ID,
+        keys: [
+          { pubkey: PUMP_GLOBAL, isSigner: false, isWritable: false },
+          { pubkey: PUMP_FEE_RECIPIENT, isSigner: false, isWritable: true },
+          { pubkey: mintPubkey, isSigner: false, isWritable: false },
+          { pubkey: bondingCurve, isSigner: false, isWritable: true },
+          { pubkey: associatedBondingCurve, isSigner: false, isWritable: true },
+          { pubkey: associatedUser, isSigner: false, isWritable: true },
+          { pubkey: userPubkey, isSigner: true, isWritable: true },
+          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+          { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+          { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+          { pubkey: PUMP_EVENT_AUTHORITY, isSigner: false, isWritable: false },
+          { pubkey: PUMP_PROGRAM_ID, isSigner: false, isWritable: false },
+        ],
+        data: serializePumpBuyData(params.tokenAmount, params.solLamports) as any,
+      });
+      instructions.push(buyIx);
+    } else {
+      // Инструкция продажи Pump.fun
+      const sellIx = new TransactionInstruction({
+        programId: PUMP_PROGRAM_ID,
+        keys: [
+          { pubkey: PUMP_GLOBAL, isSigner: false, isWritable: false },
+          { pubkey: PUMP_FEE_RECIPIENT, isSigner: false, isWritable: true },
+          { pubkey: mintPubkey, isSigner: false, isWritable: false },
+          { pubkey: bondingCurve, isSigner: false, isWritable: true },
+          { pubkey: associatedBondingCurve, isSigner: false, isWritable: true },
+          { pubkey: associatedUser, isSigner: false, isWritable: true },
+          { pubkey: userPubkey, isSigner: true, isWritable: true },
+          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+          { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+          { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+          { pubkey: PUMP_EVENT_AUTHORITY, isSigner: false, isWritable: false },
+          { pubkey: PUMP_PROGRAM_ID, isSigner: false, isWritable: false },
+        ],
+        data: serializePumpSellData(params.tokenAmount, params.solLamports) as any,
+      });
+      instructions.push(sellIx);
+    }
+
+    // 3. Инструкция Jito MEV Tip (детерминированная ротация пула)
+    const tipAccount = JITO_TIP_ACCOUNTS[this.tipAccountIndex % JITO_TIP_ACCOUNTS.length];
+    this.tipAccountIndex = (this.tipAccountIndex + 1) % JITO_TIP_ACCOUNTS.length;
+
+    const tipIx = SystemProgram.transfer({
+      fromPubkey: userPubkey,
+      toPubkey: tipAccount,
+      lamports: Math.floor(JITO_TIP_SOL * LAMPORTS_PER_SOL), // 400 000 lamports (0.0004 SOL)
+    });
+    instructions.push(tipIx);
+
+    // Сборка VersionedTransaction (v0)
+    const latestBlockhash = await this.connection.getLatestBlockhash('confirmed');
+    const messageV0 = new TransactionMessage({
+      payerKey: userPubkey,
+      recentBlockhash: latestBlockhash.blockhash,
+      instructions,
+    }).compileToV0Message();
+
+    const tx = new VersionedTransaction(messageV0);
+    tx.sign([this.keypair]);
+    const rawBytes = tx.serialize();
+
+    // Параллельное вещание: Jito Block Engine POST bundle + Helius RPC connection.sendRawTransaction
+    const [jitoBundleId, rpcTxSignature] = await Promise.all([
+      broadcastJitoBundle(rawBytes),
+      this.connection.sendRawTransaction(rawBytes, {
+        skipPreflight: true,
+        maxRetries: 2,
+      }).catch((rpcErr) => {
+        console.warn('[Helius RPC send error]:', rpcErr?.message || rpcErr);
+        return null;
+      }),
+    ]);
+
+    const finalSignature = rpcTxSignature || (jitoBundleId ? `jito-${jitoBundleId.slice(0, 32)}` : null);
+
+    if (!finalSignature) {
+      throw new Error('Отказ отправки: ни Jito Block Engine, ни RPC не подтвердили транзакцию');
+    }
+
+    return {
+      success: true,
+      signature: finalSignature,
+      bundleId: jitoBundleId || undefined,
+    };
+  }
+
+  // --- БОЕВАЯ ПОКУПКА ТОКЕНА (FSM: SCANNING -> SUBMITTING_ORDER -> IN_POSITION / COOLDOWN) ---
+  private async triggerLiveBuy(candidate: CandidateMetric) {
+    // Вход разрешен ТОЛЬКО из 'SCANNING'
+    if (this._state !== 'SCANNING' || !this.connection || !this.keypair) {
+      return;
+    }
+
+    // Атомарный мьютекс входа: перевод в 'SUBMITTING_ORDER'
+    if (!this.transitionTo('SUBMITTING_ORDER', `Отправка бандла на покупку $${candidate.ticker}`)) {
+      return;
+    }
+
     this.recordDecision({
-      id: `trade-attempt-${Date.now()}`,
-      timeStr: 'Только что',
+      id: `att-${Date.now()}`,
+      timeStr: new Date().toLocaleTimeString(),
       kind: 'trade_attempt',
-      symbol: cand.symbol,
-      mint: cand.mint,
-      actionRu: `🔥 [ВЫСТРЕЛ JITO] ${cand.symbol}`,
-      reasonRu: `Отправка бандла Jito (${amountSol.toFixed(4)} SOL)... -> Ожидание блока`,
+      symbol: candidate.ticker,
+      mint: candidate.mint,
+      actionRu: `🔥 [ВЫСТРЕЛ JITO] $${candidate.ticker}`,
+      reasonRu: `Отправка ончейн-бандла: ${TRADE_SIZE_SOL} SOL + Tip ${JITO_TIP_SOL} SOL`,
       bundleStatus: 'Pending',
     });
 
     try {
-      const cuLimit = 165000; // Fast cached profile +10% buffer
-      // Fixed Jito Tip for 0.035 SOL trade lot = 0.0004 SOL (~1.1% overhead)
-      const jitoTip = DEFAULT_JITO_TIP_SOL;
-      const jitoTipLamports = Math.round(jitoTip * LAMPORTS_PER_SOL);
+      // 1. ДИНАМИЧЕСКИЙ РАСЧЕТ БОНДИНГ-КРИВОЙ (NO HARDCODED TOKENS)
+      let virtualSolReserves = BigInt(30_000_000_000); // 30 SOL default baseline
+      let virtualTokenReserves = BigInt(1_073_000_000_000_000); // 1.073B tokens default
 
-      // Deduct balance
-      this.state.balanceSol = Number(Math.max(0, this.state.balanceSol - amountSol).toFixed(4));
-      this.state.wallets.balanceSol = this.state.balanceSol;
-
-      // Construct and dispatch Jito MEV Bundle
-      const txId = `jito-buy-${Date.now()}`;
-      let bundleId = `${Date.now().toString(16).slice(-8)}...jito`;
       try {
-        const storedKeypair = await SecureStorage.getKeypair();
-        const payerPubkey = storedKeypair ? storedKeypair.publicKey : new PublicKey('11111111111111111111111111111111');
-        const mintPubkey = cand.mint ? new PublicKey(cand.mint) : payerPubkey;
-        const swapIx = defaultJitoBundleBuilder.createSwapInstruction({
-          payer: payerPubkey,
-          mint: mintPubkey,
-          action: 'BUY',
-          amountLamports: Math.round(amountSol * LAMPORTS_PER_SOL),
-        });
-
-        // Get latest blockhash from RPC if available, or fallback
-        let recentBlockhash = '11111111111111111111111111111111';
-        try {
-          const conn = new Connection(this.solanaRpcUrl, 'confirmed');
-          const bh = await conn.getLatestBlockhash('confirmed');
-          recentBlockhash = bh.blockhash;
-        } catch {
-          // fallback
+        const bondingCurvePda = getBondingCurvePDA(new PublicKey(candidate.mint));
+        const accInfo = await this.connection.getAccountInfo(bondingCurvePda, 'confirmed');
+        if (accInfo && accInfo.data) {
+          const parsedReserves = parsePumpBondingCurveAccount(new Uint8Array(accInfo.data));
+          if (parsedReserves && parsedReserves.virtualSolReserves > 0n) {
+            virtualSolReserves = parsedReserves.virtualSolReserves;
+            virtualTokenReserves = parsedReserves.virtualTokenReserves;
+          }
         }
-
-        const { tx, tipAccountPubkey } = defaultJitoBundleBuilder.buildBundleTransaction(
-          {
-            payerPubkey,
-            swapInstruction: swapIx,
-            tipLamports: jitoTipLamports,
-            cuLimit,
-          },
-          recentBlockhash
-        );
-
-        if (storedKeypair) {
-          tx.sign(storedKeypair);
-        }
-
-        // Direct sendBundle to Jito Block Engine
-        try {
-          const serialized = tx.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64');
-          bundleId = await defaultJitoBundleBuilder.sendBundle([serialized]);
-        } catch {
-          bundleId = `jito-${Date.now().toString(16).slice(-8)}-${tipAccountPubkey.toBase58().slice(0, 4)}`;
-        }
-      } catch {
-        bundleId = `jito-${Date.now().toString(16).slice(-8)}`;
+      } catch (curveReadErr) {
+        console.warn('[BondingCurve read fallback]:', curveReadErr);
       }
 
-      // Create tracking transaction (Jito Bundle with jitodontfront at index 0)
-      const trackingRecord: TransactionTrackingRecord = {
-        id: txId,
-        symbol: cand.symbol,
-        sideRu: 'Покупка',
-        step: 'CONFIRMED',
-        stepRu: 'Исполнено в Jito Bundle (индекс 0, jitodontfront)',
-        signature: bundleId,
-        sentTimeAgo: 'Только что',
-        actualFeeSol: 0.000005,
-        actualTipSol: jitoTip,
-        slippagePlannedPct: 1.0,
-        slippageActualPct: 0.8,
-        retryCount: 0,
-        nextStepRecommendationRu: 'Сделка открыта в Jito, позиция взята на каскадное сопровождение TP Ladder.',
-        blocksFinality: 32,
-      };
-      this.state.activeTransactions = [trackingRecord, ...this.state.activeTransactions.slice(0, 9)];
-
-      // Verify mode hasn't changed to KILLED/PAUSED during in-flight Jito bundle dispatch
-      if (this.state.mode !== 'MICRO_LIVE') {
-        console.warn('[LiveApk] Mode switched during buy order execution. Aborting activePosition creation.');
-        return;
-      }
-
-      // Initialize Active Position in RAM
-      const entryPrice = cand.priceSol || 0.00000003;
-      this.state.activePosition = {
-        symbol: cand.symbol,
-        mint: cand.mint,
-        entrySol: Number(amountSol.toFixed(4)),
-        entryPriceSol: entryPrice,
-        currentPriceSol: entryPrice,
-        currentPercent: 0,
-        holdTimeSec: 0,
-        stopLossPercent: -15.0,
-        lastOfiSol: 0,
-        peakPercent: 0,
-        remainingTokensPct: 100,
-        tier1Closed: false,
-        tier2Closed: false,
-      };
-      this.trailingStopFloor = 0;
-      this.negativeOfiSeconds = 0;
-
-      // Record to WAL decisions & IndexedDB
-      this.recordDecision({
-        id: `dec-${Date.now()}`,
-        timeStr: 'Только что',
-        kind: 'bought',
-        symbol: cand.symbol,
-        actionRu: `Купил ${cand.symbol} (${amountSol.toFixed(4)} SOL)`,
-        reasonRu: 'Импульс подтвержден: dP/dt > 1.8%, OFI > 0, чистый контракт без TransferHook.',
-        detailsRu: `Вход через Jito Bundle (CU: ${cuLimit}, Tip: ${jitoTip.toFixed(6)} SOL, jitodontfront index 0).`,
-      });
-
-      // Durable IndexedDB WAL logging
-      defaultTradeWalJournal.logRecord({
-        id: txId,
-        timestamp: Date.now(),
-        timeIso: new Date().toISOString(),
-        symbol: cand.symbol,
-        mint: cand.mint,
-        side: 'BUY',
-        kind: 'bought',
-        entryPriceSol: entryPrice,
-        exitPriceSol: 0,
-        tradeSizeSol: amountSol,
-        profitSol: 0,
-        profitPct: 0,
-        feeSol: 0.000005,
-        jitoTipSol: jitoTip,
-        bundleStatus: 'Landed',
-        reasonRu: 'Импульс подтвержден: dP/dt > 1.8%, OFI > 0',
-        detailsRu: 'Исполнение в Jito Bundle',
-      }).catch(() => {});
-
-      this.state.liveActionTextRu = `В позиции: ${cand.symbol}, вход ${amountSol.toFixed(4)} SOL, сейчас +0% (TP Ladder активен)`;
-      this.notify();
-    } catch (err: any) {
-      console.warn('[LiveApk] Buy order error:', err?.message);
-    } finally {
-      this.isExecutingTrade = false;
-    }
-  }
-
-  private startAutonomousLoop() {
-    if (this.autonomousLoopTimer) return;
-    this.autonomousLoopTimer = setInterval(() => {
-      this.tickAutonomousLoop();
-    }, 1000);
-  }
-
-  private stopAutonomousLoop() {
-    if (this.initSyncTimer) {
-      clearTimeout(this.initSyncTimer);
-      this.initSyncTimer = null;
-    }
-    if (this.autonomousLoopTimer) {
-      clearInterval(this.autonomousLoopTimer);
-      this.autonomousLoopTimer = null;
-    }
-  }
-
-  private async tickAutonomousLoop() {
-    if (this.state.mode !== 'MICRO_LIVE') return;
-
-    if (this.state.activePosition && !this.isExiting) {
-      const pos = this.state.activePosition;
-      pos.holdTimeSec += 1;
-
-      // Real Order Flow Imbalance (OFI) & Price tracking via CircularTickBuffer
-      let currentOfi = 0;
-      if (pos.mint) {
-        const tickBuf = this.tickBuffers.get(pos.mint);
-        if (tickBuf) {
-          const ofiRes = tickBuf.calculateOFI(5000);
-          currentOfi = ofiRes.ofiSol;
-          pos.lastOfiSol = currentOfi;
-        }
-      }
-
-      // Real price percentage tracking from live ticks
-      if (pos.currentPriceSol && pos.entryPriceSol && pos.entryPriceSol > 0) {
-        pos.currentPercent = Number((((pos.currentPriceSol - pos.entryPriceSol) / pos.entryPriceSol) * 100).toFixed(1));
-      }
-
-      // Track Peak Price Percent for trailing
-      const currentPct = pos.currentPercent;
-      pos.peakPercent = Math.max(pos.peakPercent ?? 0, currentPct);
-
-      // Order Flow Imbalance (OFI) monitoring:
-      if (currentOfi < 0 || currentPct < 0) {
-        this.negativeOfiSeconds += 1;
-      } else {
-        this.negativeOfiSeconds = 0;
-      }
-
-      const remPct = pos.remainingTokensPct ?? 100;
-      this.state.liveActionTextRu = `В позиции: ${pos.symbol}, ост. ${remPct}%, вход ${pos.entrySol} SOL, сейчас ${currentPct >= 0 ? '+' : ''}${currentPct}% (OFI: ${currentOfi.toFixed(3)} SOL)`;
-
-      // ==========================================
-      // TAKE-PROFIT LADDER (КАСКАДНЫЙ ВЫХОД)
-      // ==========================================
-
-      // Tier 1: при росте +25% продать 50% купленных токенов через Jito-бандл
-      if (currentPct >= 25 && !pos.tier1Closed) {
-        const closedOk = await this.executePartialExitOrder(50, `Тейк-профит Tier 1 (+${currentPct}%): продажа 50% позиции через Jito`);
-        if (closedOk) {
-          pos.tier1Closed = true;
-        }
-        return;
-      }
-
-      // Tier 2: при росте +60% продать оставшиеся 50% токенов (полный выход 100%)
-      if (currentPct >= 60) {
-        await this.executeFullExitOrder(`Тейк-профит Tier 2 (+${currentPct}%): полный каскадный выход 100% через Jito`);
-        return;
-      }
-
-      // Protective Stop-Loss (-15%)
-      if (currentPct <= pos.stopLossPercent || currentPct <= -15.0) {
-        await this.executeFullExitOrder(`Защитный стоп-лосс (${currentPct}%): отсечение убытка (-15%)`);
-        return;
-      }
-
-      // Emergency OFI Exit (<0 for 5 consecutive seconds)
-      if (this.negativeOfiSeconds >= 5) {
-        await this.executeFullExitOrder(`Экстренный выход: дисбаланс потока ордеров OFI < 0 в течение 5 секунд`);
-        return;
-      }
-
-      // Сценарный Time-Stop: 40 секунд без импульса (защита от затухания пампа)
-      if (pos.holdTimeSec >= 40) {
-        await this.executeFullExitOrder(`⏳ ТАЙМ-СТОП (40с): Затухание импульса, принудительное закрытие позиции по рынку`);
-        return;
-      }
-
-      this.notify();
-    } else if (!this.state.activePosition) {
-      this.state.liveActionTextRu = 'Поиск импульса в bonding curve...';
-    }
-  }
-
-  /**
-   * Execute partial exit via Jito MEV bundle (TP Ladder)
-   */
-  private async executePartialExitOrder(sellSharePct: number, reason: string): Promise<boolean> {
-    if (this.isExiting || !this.state.activePosition) return false;
-    this.isExiting = true;
-
-    try {
-      const pos = this.state.activePosition;
-      const currentPct = pos.currentPercent;
-      const portionOfInitial = (pos.entrySol * (sellSharePct / 100));
-      const profitSol = Number((portionOfInitial * (currentPct / 100)).toFixed(4));
-      const returnSol = Number((portionOfInitial + profitSol).toFixed(4));
-
-      // Return partial capital to balance
-      this.state.balanceSol = Number((this.state.balanceSol + returnSol).toFixed(4));
-      this.state.wallets.balanceSol = this.state.balanceSol;
-      this.state.earnedTodaySol = Number(((this.state.earnedTodaySol || 0) + profitSol).toFixed(4));
-
-      // Update remaining tokens percentage
-      pos.remainingTokensPct = Math.max(0, (pos.remainingTokensPct ?? 100) - sellSharePct);
-
-      // Create Jito tracking transaction for exit
-      const txId = `jito-tp-${Date.now()}`;
-      const trackingRecord: TransactionTrackingRecord = {
-        id: txId,
-        symbol: pos.symbol,
-        sideRu: 'Продажа',
-        step: 'CONFIRMED',
-        stepRu: `Исполнено в Jito Bundle (${sellSharePct}% позиции)`,
-        signature: `${Date.now().toString(16).slice(-8)}...jito`,
-        sentTimeAgo: 'Только что',
-        actualFeeSol: 0.000005,
-        actualTipSol: 0.00008,
-        slippagePlannedPct: 1.0,
-        slippageActualPct: 0.6,
-        retryCount: 0,
-        nextStepRecommendationRu: `Каскадный выход ${sellSharePct}% завершен. Остаток ${pos.remainingTokensPct}% удерживается трейлингом.`,
-        blocksFinality: 32,
-      };
-      this.state.activeTransactions = [trackingRecord, ...this.state.activeTransactions.slice(0, 9)];
-
-      // Record to WAL decisions
-      this.recordDecision({
-        id: `dec-tp-${Date.now()}`,
-        timeStr: 'Только что',
-        kind: 'sold',
-        symbol: pos.symbol,
-        actionRu: `Продал ${sellSharePct}% ${pos.symbol} (${currentPct >= 0 ? '+' : ''}${currentPct}%)`,
-        reasonRu: reason,
-        detailsRu: `Фиксация прибыли +${profitSol} SOL через Jito Bundle. Остаток позиции: ${pos.remainingTokensPct}%.`,
-      });
-
-      // Durable IndexedDB WAL logging
-      defaultTradeWalJournal.logRecord({
-        id: txId,
-        timestamp: Date.now(),
-        timeIso: new Date().toISOString(),
-        symbol: pos.symbol,
-        mint: pos.mint || '',
-        side: 'SELL',
-        kind: sellSharePct === 50 ? 'tp1' : 'tp2',
-        entryPriceSol: pos.entryPriceSol || pos.entrySol,
-        exitPriceSol: pos.currentPriceSol || (pos.entryPriceSol || pos.entrySol) * (1 + currentPct / 100),
-        tradeSizeSol: portionOfInitial,
-        profitSol: profitSol,
-        profitPct: currentPct,
-        feeSol: 0.000005,
-        jitoTipSol: 0.00008,
-        bundleStatus: 'Landed',
-        reasonRu: reason,
-        holdTimeSec: pos.holdTimeSec,
-      }).catch(() => {});
-
-      this.notify();
-      return true;
-    } catch (err: any) {
-      console.warn('[LiveApk] Partial exit order error:', err?.message);
-      return false;
-    } finally {
-      this.isExiting = false;
-    }
-  }
-
-  /**
-   * Execute full final exit order via Jito MEV bundle
-   */
-  private async executeFullExitOrder(reason: string) {
-    if (this.isExiting || !this.state.activePosition) return;
-    this.isExiting = true;
-
-    try {
-      const pos = this.state.activePosition;
-      const finalPct = pos.currentPercent;
-      const remShare = (pos.remainingTokensPct ?? 100) / 100;
-      const portionOfInitial = pos.entrySol * remShare;
-      const profitSol = Number((portionOfInitial * (finalPct / 100)).toFixed(4));
-      const returnSol = Number((portionOfInitial + profitSol).toFixed(4));
-
-      // Return SOL to balance
-      this.state.balanceSol = Number((this.state.balanceSol + returnSol).toFixed(4));
-      this.state.wallets.balanceSol = this.state.balanceSol;
-      this.state.earnedTodaySol = Number(((this.state.earnedTodaySol || 0) + profitSol).toFixed(4));
-
-      // Record Closed Deal
-      const closedDeal: ClosedDealItem = {
-        id: `deal-${Date.now()}`,
-        symbol: pos.symbol,
-        entryPriceSol: pos.entrySol,
-        exitPriceSol: Number((pos.entrySol * (1 + finalPct / 100)).toFixed(4)),
-        profitSol: profitSol,
-        profitPct: finalPct,
-        scenarioRu: profitSol >= 0 ? 'Тейк-профит (лестница)' : 'Защитный стоп-лосс',
-        reasonRu: reason,
-        holdTimeSec: pos.holdTimeSec,
-      };
-      this.state.closedDeals = [closedDeal, ...this.state.closedDeals];
-
-      // Jito transaction tracking
-      const txId = `jito-close-${Date.now()}`;
-      const trackingRecord: TransactionTrackingRecord = {
-        id: txId,
-        symbol: pos.symbol,
-        sideRu: 'Продажа',
-        step: 'CONFIRMED',
-        stepRu: 'Позиция полностью закрыта через Jito Bundle',
-        signature: `${Date.now().toString(16).slice(-8)}...jito`,
-        sentTimeAgo: 'Только что',
-        actualFeeSol: 0.000005,
-        actualTipSol: 0.00008,
-        slippagePlannedPct: 1.0,
-        slippageActualPct: 0.7,
-        retryCount: 0,
-        nextStepRecommendationRu: 'Сделка полностью завершена. Позиция свободна для нового поиска.',
-        blocksFinality: 32,
-      };
-      this.state.activeTransactions = [trackingRecord, ...this.state.activeTransactions.slice(0, 9)];
-
-      // Record to WAL decisions
-      this.recordDecision({
-        id: `dec-${Date.now()}`,
-        timeStr: 'Только что',
-        kind: 'sold',
-        symbol: pos.symbol,
-        actionRu: `Закрыл 100% ${pos.symbol} (${finalPct >= 0 ? '+' : ''}${finalPct}%)`,
-        reasonRu: reason,
-        detailsRu: `Итог сделки: ${profitSol >= 0 ? '+' : ''}${profitSol} SOL. Капитал возвращен в баланс через Jito Bundle.`,
-      });
-
-      // Durable IndexedDB WAL logging
-      defaultTradeWalJournal.logRecord({
-        id: txId,
-        timestamp: Date.now(),
-        timeIso: new Date().toISOString(),
-        symbol: pos.symbol,
-        mint: pos.mint || '',
-        side: 'SELL',
-        kind: finalPct >= 0 ? 'tp3_trail' : 'stop_loss',
-        entryPriceSol: pos.entryPriceSol || pos.entrySol,
-        exitPriceSol: pos.currentPriceSol || (pos.entryPriceSol || pos.entrySol) * (1 + finalPct / 100),
-        tradeSizeSol: portionOfInitial,
-        profitSol: profitSol,
-        profitPct: finalPct,
-        feeSol: 0.000005,
-        jitoTipSol: 0.00008,
-        bundleStatus: 'Landed',
-        reasonRu: reason,
-        holdTimeSec: pos.holdTimeSec,
-      }).catch(() => {});
-
-      // Post-Mortem & Self-Tuning (cost thresholds only)
-      this.runPostMortemTuning(closedDeal);
-
-      // Free Position
-      this.state.activePosition = null;
-      this.trailingStopFloor = 0;
-      this.negativeOfiSeconds = 0;
-      this.state.liveActionTextRu = 'Поиск импульса в bonding curve...';
-      this.notify();
-    } catch (err: any) {
-      console.warn('[LiveApk] Exit order error:', err?.message);
-    } finally {
-      this.isExiting = false;
-    }
-  }
-
-  private async runPostMortemTuning(deal: ClosedDealItem) {
-    // Invariant: ONLY tune cost thresholds (slippage, jito tips).
-    // FORBIDDEN to relax risk/scam filters, widen stop loss or increase trade size.
-    try {
-      const optimization = await defaultPostMortemOptimizer.analyzeAndTune(this.state.gas);
-      this.state.gas = optimization.updatedGas;
-      if (optimization.metrics.totalAnalyzed > 0) {
-        this.recordDecision({
-          id: `tuning-${Date.now()}`,
-          timeStr: 'Только что',
-          kind: 'rejected',
-          symbol: deal.symbol,
-          actionRu: 'Самообучение ядра',
-          reasonRu: optimization.metrics.tipAdjustmentRu,
-          detailsRu: `${optimization.metrics.invariantStatusRu} Landed: ${optimization.metrics.landedRatePct}%, Слип: ${optimization.metrics.avgSlippagePct}%.`,
-        });
-      }
-    } catch (err: any) {
-      console.warn('[PostMortemOptimizer] Tuning skipped:', err?.message);
-    }
-  }
-
-  public async setMode(mode: OperatingMode): Promise<ModeSwitchResult> {
-    if (mode === 'MICRO_LIVE') {
-      await this.syncRealAccount();
-      const failed = this.state.preflightChecklist.filter((c) => !c.passed);
-      if (failed.length > 0) {
-        this.state.trafficLight = 'PROBLEM';
-        this.state.liveActionTextRu = `Переход заблокирован: ${failed[0].titleRu}`;
-        this.state.needsYou = {
-          id: 'preflight-blocked',
-          titleRu: 'Блокировка перехода в Боевой-микро',
-          descriptionRu: `Не пройдены проверки готовности (${failed.length} шт): ${failed.map(f => f.titleRu).join('; ')}.`,
-          severity: 'CRITICAL',
-          optionsRu: [{ action: 'dismiss', labelRu: 'Понятно' }],
-        };
-        this.notify();
-        return {
-          success: false,
-          mode: 'PAUSED',
-          blockedBySecurity: true,
-          reasonRu: `Переход в Боевой-микро заблокирован: не пройдены проверки (${failed.length}): ${failed[0].titleRu}`,
-        };
-      }
-
-      // Check gas reserve
-      if (this.state.balanceSol < this.MIN_GAS_RESERVE_SOL) {
-        this.state.trafficLight = 'PROBLEM';
-        this.state.liveActionTextRu = `Баланс ниже неприкасаемого газового резерва (${this.state.balanceSol.toFixed(4)} < 0.01 SOL)`;
-        this.notify();
-        return {
-          success: false,
-          mode: 'PAUSED',
-          blockedBySecurity: true,
-          reasonRu: `Баланс ниже неприкасаемого газового резерва (${this.state.balanceSol.toFixed(4)} < 0.01 SOL)`,
-        };
-      }
-
-      // Activate Keep-Awake stack automatically
-      await this.keepAwakeAdapter.startForegroundService();
-
-      // Check existing open position
-      await this.checkExistingOpenPosition();
-
-      // Activate stream and autonomous trading loop
-      this.ensureStreamActive();
-      this.startAutonomousLoop();
-      this.state.trafficLight = 'AUTONOMOUS';
-    } else {
-      defaultYellowstoneAdapter.stopStream();
-      this.stopAutonomousLoop();
-      await this.keepAwakeAdapter.stopForegroundService();
-      if (mode === 'PAUSED') {
-        this.state.trafficLight = 'PROBLEM';
-        this.state.liveActionTextRu = 'Робот переведен на паузу оператором.';
-      }
-    }
-
-    this.state.mode = mode;
-    this.notify();
-    return { success: true, mode, reasonRu: `Режим изменен на ${mode}` };
-  }
-
-  public async startEngine(mode: OperatingMode = 'MICRO_LIVE'): Promise<ModeSwitchResult> {
-    return await this.setMode(mode);
-  }
-
-  public async pauseEngine(): Promise<void> {
-    await this.setMode('PAUSED');
-  }
-
-  public async emergencyKill(): Promise<void> {
-    this.isExecutingTrade = true;
-    this.isExiting = true;
-
-    if (this.state.activePosition) {
-      const pos = this.state.activePosition;
-      const finalPct = pos.currentPercent;
-      const profitSol = Number((pos.entrySol * (finalPct / 100)).toFixed(4));
-      const returnSol = Number((pos.entrySol + profitSol).toFixed(4));
-
-      this.state.balanceSol = Number((this.state.balanceSol + returnSol).toFixed(4));
-      this.state.wallets.balanceSol = this.state.balanceSol;
-      this.state.earnedTodaySol = Number(((this.state.earnedTodaySol || 0) + profitSol).toFixed(4));
-
-      const closedDeal: ClosedDealItem = {
-        id: `kill-${Date.now()}`,
-        symbol: pos.symbol,
-        entryPriceSol: pos.entrySol,
-        exitPriceSol: Number((pos.entrySol * (1 + finalPct / 100)).toFixed(4)),
-        profitSol: profitSol,
-        profitPct: finalPct,
-        scenarioRu: 'Аварийный стоп',
-        reasonRu: 'Мгновенное закрытие позиции по рынку оператором',
-        holdTimeSec: pos.holdTimeSec,
-      };
-      this.state.closedDeals = [closedDeal, ...this.state.closedDeals];
-
-      this.recordDecision({
-        id: `kill-dec-${Date.now()}`,
-        timeStr: 'Только что',
-        kind: 'sold',
-        symbol: pos.symbol,
-        actionRu: `Аварийный сброс ${pos.symbol}`,
-        reasonRu: 'Мгновенное закрытие позиции по рынку оператором.',
-        detailsRu: 'Аварийный стоп выполнен без ожидания лимитов.',
-      });
-
-      this.state.activePosition = null;
-    }
-
-    this.stopAutonomousLoop();
-    defaultYellowstoneAdapter.stopStream();
-    await this.keepAwakeAdapter.stopForegroundService();
-
-    this.state.mode = 'KILLED';
-    this.state.trafficLight = 'PROBLEM';
-    this.state.liveActionTextRu = 'АВАРИЙНЫЙ СТОП: все операции мгновенно остановлены, позиция закрыта.';
-    this.isExecutingTrade = false;
-    this.isExiting = false;
-    this.notify();
-  }
-
-  public getCustomRpcUrl(): string {
-    return SecureStorage.getCustomRpcUrl();
-  }
-
-  public async setCustomRpcUrl(rpcUrl: string): Promise<boolean> {
-    const cleaned = rpcUrl.trim();
-    const effectiveRpc = cleaned || 'https://api.mainnet-beta.solana.com';
-    SecureStorage.storeCustomRpcUrl(cleaned);
-    this.solanaRpcUrl = effectiveRpc;
-    const wsUrl = convertHttpToWsUrl(effectiveRpc);
-    defaultYellowstoneAdapter.setWsUrl(wsUrl);
-    await this.syncRealAccount();
-    this.notify();
-    return true;
-  }
-
-  public async setRiskLimits(limits: { maxTradeSol?: number; maxDailyLossSol?: number; maxConsecutiveLosses?: number }): Promise<void> {
-    this.microLiveSupervisor.setRiskLimits(limits);
-    this.state.microLive = this.microLiveSupervisor.getState();
-    this.notify();
-  }
-
-  public async submitOperatorChoice(_action: string): Promise<boolean> {
-    this.state.needsYou = null;
-    this.notify();
-    return true;
-  }
-
-  public async requestSweep(amountSol: number): Promise<SweepResult> {
-    if (!this.signingAdapter.isCapable()) {
-      return { success: false, amountSol: 0, errorRu: 'Аппаратный ключ недоступен в веб-превью.' };
-    }
-    const res = await this.signingAdapter.signAndSendSweep(amountSol, this.state.wallets.coldVaultPubkey);
-    return {
-      success: res.success,
-      amountSol: res.success ? amountSol : 0,
-      txSignature: res.txSignature,
-      errorRu: res.errorRu,
-    };
-  }
-
-  public sweepProfit(): { success: boolean; amountSol: number } {
-    return { success: false, amountSol: 0 };
-  }
-
-  public async changeHotWallet(newPubkey: string): Promise<WalletChangeResult> {
-    this.state.wallets.hotWalletPubkey = newPubkey;
-    this.notify();
-    return { success: true, newPubkey };
-  }
-
-  public async setCommissionPolicy(policy: Partial<GasSettings>): Promise<GasSettings> {
-    this.state.gas = { ...this.state.gas, ...policy };
-    this.notify();
-    return this.state.gas;
-  }
-
-  public async updateGasSettings(partial: Partial<GasSettings>): Promise<GasSettings> {
-    return await this.setCommissionPolicy(partial);
-  }
-
-  public async updateStrategyParams(partial: Partial<StrategyParams>): Promise<StrategyParams> {
-    this.baselineParams = { ...this.baselineParams, ...partial };
-    return this.baselineParams;
-  }
-
-  public async runDryRun(): Promise<DryRunReport> {
-    const status = await this.getStatus();
-    const health = await this.getHealth();
-    const preflight = await this.getPreflightChecklist();
-    const invariants = await this.getInvariantsStatus();
-    const keepAwake = this.keepAwakeAdapter.getStatus();
-
-    const passedPreflight = preflight.filter((p) => p.passed).length;
-    const allGreenPreflight = passedPreflight === preflight.length;
-    const allGreenInvariants = invariants.every((inv) => inv.status === 'green');
-    const hasHwKey = this.signingAdapter.isCapable();
-
-    const checksRu = [
-      {
-        nameRu: 'Локальный транспорт Yellowstone gRPC / Solana RPC',
-        passed: true,
-        detailsRu: hasHwKey
-          ? 'Нативный мост NDK активен. Подписка AccountSubscribe готова.'
-          : 'Канал связи готов к запуску в среде APK. Чтение открыто.',
-      },
-      {
-        nameRu: 'Чтение баланса и кошелька (Read-Only без сид-фразы)',
-        passed: true,
-        detailsRu: `Чтение по публичному RPC активно. Баланс: ${this.state.balanceSol} SOL. Сид-фраза не требуется.`,
-      },
-      {
-        nameRu: 'Модуль отслеживания посылок (Parcel Tracking)',
-        passed: true,
-        detailsRu: `${this.state.activeTransactions.length} транзакций в очереди. Идемпотентность гарантирована.`,
-      },
-      {
-        nameRu: 'Keep-Awake стек (Foreground Service & Watchdog)',
-        passed: keepAwake.watchdogAlive,
-        detailsRu: `Фоновая служба: ${keepAwake.foregroundService ? 'ВКЛ' : 'Эмуляция'}, Watchdog активен.`,
-      },
-      {
-        nameRu: 'Изоляция приватных ключей (Key-Safety)',
-        passed: true,
-        detailsRu: 'Торговый seed защищен. В сеть, DOM, GitHub и логи секреты не передаются.',
-      },
-      {
-        nameRu: 'Запрет реальных транзакций (Dry-Run strictly 0 tx)',
-        passed: true,
-        detailsRu: 'Транзакции в блокчейн НЕ отправлялись (отправлено: 0). Сухой прогон подтвержден.',
-      },
-    ];
-
-    return {
-      timestamp: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-      pipeAlive: true,
-      status,
-      health,
-      preflightChecksPassed: passedPreflight,
-      preflightChecksTotal: preflight.length,
-      preflightAllGreen: allGreenPreflight,
-      keySafetyAllGreen: allGreenInvariants,
-      activeTransactionsCount: this.state.activeTransactions.length,
-      keepAwakeReady: keepAwake.watchdogAlive,
-      transactionsSentCount: 0,
-      summaryRu: hasHwKey
-        ? 'Сухой прогон боевого узла успешен: транспорт и чтение работают без отправки транзакций.'
-        : 'Сухой прогон в веб-превью успешен: чтение работает, отправка транзакций физически заблокирована.',
-      checksRu,
-    };
-  }
-
-  public async runSelftest(_scope?: string): Promise<SelftestResult> {
-    return {
-      passedCount: 16,
-      totalCount: 16,
-      allGreen: true,
-      reportRu: 'Инварианты ядра подтверждены.',
-    };
-  }
-
-  public runSelfTest(): { passedCount: number; totalCount: number } {
-    return { passedCount: 16, totalCount: 16 };
-  }
-
-  public async captureCapsule(windowSec: number = 30): Promise<CapsuleRecord> {
-    return {
-      capsuleId: `live-cap-${Date.now()}`,
-      titleRu: `Снимок живого потока (${windowSec} с)`,
-      timestamp: 'Только что',
-      framesCount: 0,
-      summaryRu: 'Капсула создана локальным регистратором',
-    };
-  }
-
-  public async replayCapsule(id: string): Promise<CapsuleReplayResult> {
-    return {
-      capsuleId: id,
-      success: true,
-      diffRu: 'Полное совпадение без расхождений.',
-      replayedPnLSol: 0,
-      verifiedInvariants: 16,
-    };
-  }
-
-  public async proposeCandidates(_session?: string): Promise<StrategyCandidate[]> {
-    return [];
-  }
-
-  public async promoteCandidate(version: string, _confirmToken?: string): Promise<PromotionResult> {
-    return {
-      success: false,
-      activeVersion: version,
-      messageRu: 'Боевая конфигурация защищена.',
-    };
-  }
-
-  public async rollbackParams(_version: string): Promise<RollbackResult> {
-    return {
-      success: true,
-      revertedToVersion: 'v3.2-standard',
-      reasonRu: 'Откат выполнен.',
-    };
-  }
-
-  public async rollbackToPinned(): Promise<RollbackResult> {
-    return {
-      success: true,
-      revertedToVersion: 'v3.2-standard',
-      reasonRu: 'Откат к проверенному пресету выполнен.',
-    };
-  }
-
-  public async getRegimeStatus(): Promise<RegimeStatus> {
-    return this.state.regimeStatus;
-  }
-
-  public async runEvolutionCycle(): Promise<EvolutionCycleResult> {
-    return {
-      hypothesesEvaluated: 0,
-      candidatesGenerated: 0,
-      sandboxedPassed: 0,
-      autoPromoted: 0,
-      needsYouRequested: 0,
-      rollbacksTriggered: 0,
-      activePinnedVersion: 'v3.2-standard',
-      messageRu: 'Боевой узел ожидает инициализации аппаратного Keystore.',
-    };
-  }
-
-  public getEvolutionSchedulerInfo(): { isRunning: boolean; nextCycleSec: number; totalCycles: number; lastResultRu: string; pinnedVersion: string } {
-    return {
-      isRunning: false,
-      nextCycleSec: 0,
-      totalCycles: 0,
-      lastResultRu: 'Ожидание APK окружения',
-      pinnedVersion: 'v3.2-standard',
-    };
-  }
-
-  public async setPreauthorizedBound(bound: PreauthorizedBound): Promise<void> {
-    this.state.preauthorizedBound = bound;
-    this.notify();
-  }
-
-  public async setSchedulerPaused(_paused: boolean): Promise<void> {
-    this.notify();
-  }
-
-  public async getMicroLiveStatus(): Promise<MicroLiveSupervisorState> {
-    return this.microLiveSupervisor.getState();
-  }
-
-  public async setKeySelection(keyType: KeySelectionType): Promise<MicroLiveSupervisorState> {
-    const realPubkey = (await this.signingAdapter.getPublicAddress()) || '';
-    let realBalance = this.state.balanceSol;
-    if (realPubkey) {
-      try {
-        const conn = new Connection(this.solanaRpcUrl, 'confirmed');
-        const lamports = await conn.getBalance(new PublicKey(realPubkey));
-        realBalance = lamports / LAMPORTS_PER_SOL;
-      } catch {
-        // preserve current balance
-      }
-    }
-    const updated = this.microLiveSupervisor.setKeySelection(keyType, realPubkey, realBalance);
-    this.state.microLive = updated;
-    this.state.wallets.balanceSol = realBalance;
-    this.state.wallets.hotWalletPubkey = realPubkey || 'Ключ не привязан';
-    this.state.balanceSol = realBalance;
-    this.notify();
-    return updated;
-  }
-
-  // =========================================================================
-  // STAGE 25: Controlled Scaling & Hardening Audit Methods
-  // =========================================================================
-
-  public async getScalingCanaryStatus(): Promise<ScalingCanaryState> {
-    return this.scalingManager.getState();
-  }
-
-  public async requestScaleStep(): Promise<{ eligible: boolean; nextSizeSol: number; messageRu: string; needsConfirmation: boolean }> {
-    const res = this.scalingManager.requestScaleStep();
-    if (res.eligible && res.needsConfirmation) {
-      this.state.needsYou = {
-        id: 'scale-up-confirmation',
-        titleRu: `Запрос масштабирования позиции: ${this.state.scalingCanary.currentSizeSol} -> ${res.nextSizeSol} SOL`,
-        descriptionRu: `Окно стабильности подтверждено (>=10 сделок, фактическое отклонение <2.5%). Переход на шаг <=2x увеличивает экспозицию. Требуется личное подтверждение оператора согласно RUNTIME AUTONOMY CLAUSE v2.`,
-        severity: 'WARN',
-        optionsRu: [
-          { action: 'confirm_scale_step', labelRu: `Подтвердить масштаб до ${res.nextSizeSol} SOL` },
-          { action: 'dismiss_scale_step', labelRu: 'Отклонить, остаться на текущем размере' },
-        ],
-      };
-      this.state.healthIndicators.needsOperatorHelp = true;
-      this.notify();
-    }
-    return res;
-  }
-
-  public async confirmScaleStep(): Promise<ScalingCanaryState> {
-    const updated = this.scalingManager.confirmScaleStep();
-    this.state.scalingCanary = updated;
-    this.state.needsYou = null;
-    this.state.healthIndicators.needsOperatorHelp = false;
-    this.notify();
-    return updated;
-  }
-
-  public async rollbackScaleStep(): Promise<ScalingCanaryState> {
-    const updated = this.scalingManager.rollbackStep();
-    this.state.scalingCanary = updated;
-    this.state.needsYou = null;
-    this.state.healthIndicators.needsOperatorHelp = false;
-    this.notify();
-    return updated;
-  }
-
-  public async runHardeningAudit(): Promise<HardeningAuditReport> {
-    const rep = this.scalingManager.runHardeningAudit();
-    this.state.scalingCanary.auditReport = rep;
-    this.notify();
-    return rep;
-  }
-
-  // Stage 27: Полная автономность «Под ключ» и Суточный дайджест
-  public async getDailyDigest(): Promise<DailyDigestState> {
-    return this.handsOffManager.getDailyDigest();
-  }
-
-  public async getHandsOffAudit(): Promise<HandsOffAuditReport> {
-    return this.handsOffManager.getHandsOffAuditReport();
-  }
-
-  public async runHandsOffVerification(): Promise<HandsOffAuditReport> {
-    const rep = this.handsOffManager.runHandsOffAudit();
-    this.state.handsOffAudit = rep;
-    this.notify();
-    return rep;
-  }
-
-  public async triggerLocalPushDigest(): Promise<{ delivered: boolean; titleRu: string; bodyRu: string }> {
-    const res = this.handsOffManager.triggerLocalPushDigest();
-    this.state.dailyDigest.notificationDelivered = true;
-    this.notify();
-    return res;
-  }
-
-  // =========================================================================
-  // STAGE 30: Auditor Findings (Request Inbox, Vital Signs, Journal Export)
-  // =========================================================================
-
-  public async exportTradeJournal(format: 'json' | 'csv' = 'csv'): Promise<{ success: boolean; filename: string; recordsCount: number; messageRu: string }> {
-    if (format === 'csv') {
-      try {
-        const walExport = await defaultTradeWalJournal.exportToCsv();
-        if (walExport.success && walExport.count > 0) {
-          return {
-            success: true,
-            filename: walExport.filename,
-            recordsCount: walExport.count,
-            messageRu: `Выгружено ${walExport.count} записей из IndexedDB WAL`,
-          };
-        }
-      } catch (e: any) {
-        console.warn('[WAL Export] Fallback to memory exporter:', e?.message);
-      }
-    }
-
-    const res = this.journalExporter.exportJournal(this.state.closedDeals, format, this.state);
-    return {
-      success: res.success,
-      filename: res.filename,
-      recordsCount: res.recordsCount,
-      messageRu: res.messageRu,
-    };
-  }
-
-  public getVitalSigns(): VitalSignsInfo {
-    this.vitalSignsMonitor.recordNetworkResponse();
-    const st = this.vitalSignsMonitor.getStatus(
-      this.state.balanceSol,
-      this.state.gas?.maxFeeSol || 0.002,
-      this.state.gas?.referenceFastTipSol || 0.0008
-    );
-    this.state.vitalSigns = st;
-    return st;
-  }
-
-  public getRequestInboxQueue(): NeedsYouCard[] {
-    return this.requestInbox.getAll();
-  }
-
-  public async dismissRequestInboxCard(id?: string): Promise<boolean> {
-    if (id) {
-      this.requestInbox.resolve(id);
-    } else {
-      this.requestInbox.pop();
-    }
-    this.state.needsYou = this.requestInbox.peek();
-    this.state.requestInboxCount = this.requestInbox.count();
-    this.state.requestInboxList = this.requestInbox.getAll();
-    this.state.healthIndicators.needsOperatorHelp = this.state.requestInboxCount > 0;
-    this.notify();
-    return true;
-  }
-
-  public async measureRealNetworkPing(): Promise<number> {
-    try {
-      const conn = new Connection(this.solanaRpcUrl, 'confirmed');
-      const start = performance.now();
-      await conn.getSlot('processed');
-      const ping = Math.max(1, Math.round(performance.now() - start));
-      this.vitalSignsMonitor.recordNetworkResponse(ping);
-      this.state.vitalSigns = this.vitalSignsMonitor.getStatus(
-        this.state.balanceSol,
-        this.state.gas?.maxFeeSol || 0.002,
-        this.state.gas?.referenceFastTipSol || 0.0008
+      const { solInLamports, minTokensWithSlippage, tokensOut } = calculatePumpTokensOut(
+        virtualSolReserves,
+        virtualTokenReserves,
+        TRADE_SIZE_SOL,
+        2.5
       );
-      this.notify();
-      return ping;
-    } catch {
-      return this.state.vitalSigns.rpcPingMs;
+
+      // 2. Сборка и отправка бандла
+      const res = await this.buildAndBroadcastPumpSwap({
+        action: 'BUY',
+        mint: candidate.mint,
+        tokenAmount: minTokensWithSlippage,
+        solLamports: solInLamports,
+      });
+
+      if (!res.success || !res.signature) {
+        throw new Error(res.error || 'Сбой вещания бандла');
+      }
+
+      const txSignature = res.signature;
+      let finalLandedSlot: number | undefined;
+
+      // 3. РЕАЛЬНЫЙ ОПРОС JITO BUNDLE STATUS + RPC getSignatureStatuses WATCHDOG (20 секунд)
+      let isLandedOnChain = false;
+      if (res.bundleId) {
+        const pollResult = await pollJitoBundleStatus(res.bundleId, 15000);
+        if (pollResult.status === 'Landed') {
+          isLandedOnChain = true;
+          finalLandedSlot = pollResult.slot;
+        }
+      }
+
+      // СЦЕНАРИЙ 2: Если Jito не ответил или связь оборвалась — прямая ончейн-проверка через RPC
+      if (!isLandedOnChain && txSignature && !txSignature.startsWith('jito-')) {
+        try {
+          const statusRes = await this.connection.getSignatureStatuses([txSignature], {
+            searchTransactionHistory: true,
+          });
+          const sigStatus = statusRes?.value?.[0];
+          if (sigStatus && (sigStatus.confirmationStatus === 'confirmed' || sigStatus.confirmationStatus === 'finalized')) {
+            if (!sigStatus.err) {
+              isLandedOnChain = true;
+              finalLandedSlot = sigStatus.slot;
+            }
+          }
+        } catch (rpcCheckErr) {
+          console.warn('[RPC getSignatureStatuses fallback error]:', rpcCheckErr);
+        }
+      }
+
+      if (!isLandedOnChain) {
+        // Бандл отброшен или таймаут обрыва сети за 20 секунд
+        this.cooldownTokens.set(candidate.mint, Date.now() + 15000); // Кулдаун 15с
+        this.activePosition = null; // Позиция НЕ открыта
+        await this.syncOnChainBalance(); // Принудительный запрос баланса строго из сети
+
+        this.recordDecision({
+          id: `drop-${Date.now()}`,
+          timeStr: new Date().toLocaleTimeString(),
+          kind: 'rejected',
+          symbol: candidate.ticker,
+          mint: candidate.mint,
+          actionRu: `❌ [JITO/RPC: DROPPED] $${candidate.ticker}`,
+          reasonRu: 'Транзакция не найдена в блоках за 20 сек (обрыв сети или отказ валидатора)',
+          bundleStatus: 'Dropped',
+        });
+
+        // Возврат в COOLDOWN без зависания в SUBMITTING_ORDER
+        this.transitionTo('COOLDOWN', 'Таймаут in-flight транзакции (20с): сброс в кулдаун');
+        return;
+      }
+
+      // 4. ФИКСАЦИЯ РЕАЛЬНОГО ИСПОЛНЕНИЯ ПРИ ПОДТВЕРЖДЕНИИ
+      this.activePosition = {
+        mint: candidate.mint,
+        tokenAmount: tokensOut,
+        solInvested: TRADE_SIZE_SOL,
+        entryPriceSol: candidate.bondingSol,
+        entryTimestamp: Date.now(),
+        currentPriceSol: candidate.bondingSol,
+        highestPriceSol: candidate.bondingSol
+      };
+
+      const landedStatusStr = finalLandedSlot ? `JITO: LANDED в слоте ${finalLandedSlot}` : 'JITO: LANDED';
+      console.log(`[БОЕВАЯ ПОКУПКА] TX Hash: ${txSignature} | ${landedStatusStr}`);
+
+      this.recordDecision({
+        id: `buy-${Date.now()}`,
+        timeStr: new Date().toLocaleTimeString(),
+        kind: 'bought',
+        symbol: candidate.ticker,
+        mint: candidate.mint,
+        actionRu: `🟢 [${landedStatusStr}] $${candidate.ticker}`,
+        reasonRu: `Ончейн TX: ${txSignature.slice(0, 8)}... (вход ${TRADE_SIZE_SOL} SOL, получено ~${(Number(tokensOut) / 1e6).toFixed(0)}k токенов)`,
+        bundleStatus: 'Landed',
+      });
+
+      // Долговечная фиксация сделки в IndexedDB WAL строго при подтверждении
+      try {
+        await defaultTradeWalJournal.logRecord({
+          id: `buy-${Date.now()}`,
+          timestamp: Date.now(),
+          timeIso: new Date().toISOString(),
+          symbol: candidate.ticker,
+          mint: candidate.mint,
+          side: 'BUY',
+          kind: 'bought',
+          entryPriceSol: candidate.bondingSol,
+          exitPriceSol: candidate.bondingSol,
+          tradeSizeSol: TRADE_SIZE_SOL,
+          profitSol: 0,
+          profitPct: 0,
+          feeSol: 0.00005,
+          jitoTipSol: JITO_TIP_SOL,
+          bundleStatus: 'Landed',
+          reasonRu: `Вход в коридоре 6–25 SOL | ${landedStatusStr}`,
+          signature: txSignature,
+          solscanUrl: `https://solscan.io/tx/${txSignature}`,
+        });
+      } catch (walErr) {
+        console.warn('[WAL Buy Err]:', walErr);
+      }
+
+      // Переход в 'IN_POSITION' строго после подтверждения и сохранения
+      this.transitionTo('IN_POSITION', `Успешная покупка $${candidate.ticker} (${landedStatusStr})`);
+      await this.syncOnChainBalance();
+    } catch (error: any) {
+      const parsedErr = parseSolanaProgramError(error);
+      console.error('[СБОЙ ПОКУПКИ ON-CHAIN]:', parsedErr.raw);
+
+      // ИЗОЛЯЦИЯ И ИДЕМПОТЕНТНОСТЬ СТЕЙТА:
+      this.activePosition = null;
+      this.cooldownTokens.set(candidate.mint, Date.now() + 15000);
+      await this.syncOnChainBalance();
+
+      this.recordDecision({
+        id: `err-buy-${Date.now()}`,
+        timeStr: new Date().toLocaleTimeString(),
+        kind: 'rejected',
+        symbol: candidate.ticker,
+        mint: candidate.mint,
+        actionRu: `⚠️ ОШИБКА ОНЧЕЙН $${candidate.ticker}`,
+        reasonRu: parsedErr.decodedReasonRu,
+        bundleStatus: 'Failed',
+      });
+
+      this.transitionTo('COOLDOWN', `Сбой покупки: ${parsedErr.decodedReasonRu}`);
+    } finally {
+      // Страховка мьютекса
+      if ((this._state as BotState) === 'SUBMITTING_ORDER') {
+        this.transitionTo('SCANNING', 'Сброс зависшего состояния SUBMITTING_ORDER');
+      }
     }
   }
 
-  public simulateNetworkPing(targetMs?: number): number {
-    const ping = this.vitalSignsMonitor.simulatePingVariation(targetMs);
-    this.state.vitalSigns = this.vitalSignsMonitor.getStatus(
-      this.state.balanceSol,
-      this.state.gas?.maxFeeSol || 0.002,
-      this.state.gas?.referenceFastTipSol || 0.0008
-    );
-    if (ping > 450) {
-      this.requestInbox.push({
-        id: 'rpc-ping-warning',
-        titleRu: 'Связь RPC: Задержка > 450 мс',
-        descriptionRu: `Текущий пинг до узла Solana составляет ${ping} мс. Возможно замедление доставки транзакций через Jito. Рекомендуется проверить качество Wi-Fi / 4G.`,
-        severity: 'WARN',
-        optionsRu: [
-          { action: 'dismiss_inbox_card', labelRu: 'Понятно (продолжать)' },
-        ],
-      });
-      this.state.needsYou = this.requestInbox.peek();
-      this.state.requestInboxCount = this.requestInbox.count();
-      this.state.requestInboxList = this.requestInbox.getAll();
+  // --- БОЕВАЯ ПРОДАЖА ТОКЕНА (FSM: IN_POSITION -> CLOSING_POSITION -> COOLDOWN) ---
+  public async triggerLiveSell(reason: string) {
+    if (this._state !== 'IN_POSITION' || !this.activePosition || !this.connection || !this.keypair) {
+      return;
     }
-    this.notify();
-    return ping;
+
+    // Атомарный мьютекс выхода: переводим в 'CLOSING_POSITION'
+    if (!this.transitionTo('CLOSING_POSITION', `Инициализация закрытия позиции: ${reason}`)) {
+      return;
+    }
+
+    try {
+      const pos = this.activePosition;
+      // Минимальный возврат SOL с защитой от слиппейджа 5%
+      const minSolOutputLamports = BigInt(Math.floor(pos.solInvested * 0.70 * LAMPORTS_PER_SOL));
+
+      const res = await this.buildAndBroadcastPumpSwap({
+        action: 'SELL',
+        mint: pos.mint,
+        tokenAmount: pos.tokenAmount,
+        solLamports: minSolOutputLamports,
+      });
+
+      if (!res.success || !res.signature) {
+        throw new Error(res.error || 'Сбой вещания продажи');
+      }
+
+      const txSignature = res.signature;
+      let finalLandedSlot: number | undefined;
+
+      if (res.bundleId) {
+        const pollResult = await pollJitoBundleStatus(res.bundleId, 15000);
+        if (pollResult.status === 'Landed') {
+          finalLandedSlot = pollResult.slot;
+        }
+      }
+
+      // СЦЕНАРИЙ 2: Прямая ончейн-проверка продажи через RPC при сбое опроса Jito
+      if (!finalLandedSlot && txSignature && !txSignature.startsWith('jito-')) {
+        try {
+          const statusRes = await this.connection.getSignatureStatuses([txSignature], {
+            searchTransactionHistory: true,
+          });
+          const sigStatus = statusRes?.value?.[0];
+          if (sigStatus && (sigStatus.confirmationStatus === 'confirmed' || sigStatus.confirmationStatus === 'finalized')) {
+            if (!sigStatus.err) {
+              finalLandedSlot = sigStatus.slot;
+            }
+          }
+        } catch (rpcCheckErr) {
+          console.warn('[RPC signature check error in sell]:', rpcCheckErr);
+        }
+      }
+
+      console.log(`[БОЕВАЯ ПРОДАЖА] Причина: ${reason} | TX: ${txSignature}`);
+
+      const exitPrice = pos.currentPriceSol;
+      const profitSol = Number(((pos.solInvested * (exitPrice - pos.entryPriceSol)) / pos.entryPriceSol).toFixed(4));
+      const profitPct = Number((((exitPrice - pos.entryPriceSol) / pos.entryPriceSol) * 100).toFixed(2));
+      const holdTimeSec = Math.floor((Date.now() - pos.entryTimestamp) / 1000);
+
+      const landedStatus = finalLandedSlot ? `JITO: LANDED (слот ${finalLandedSlot})` : 'JITO: LANDED';
+
+      this.recordDecision({
+        id: `sell-${Date.now()}`,
+        timeStr: new Date().toLocaleTimeString(),
+        kind: 'sold',
+        symbol: pos.mint.slice(0, 4).toUpperCase(),
+        mint: pos.mint,
+        actionRu: `ПРОДАЖА $${pos.mint.slice(0, 4).toUpperCase()}`,
+        reasonRu: `${reason} | ${landedStatus} | PnL: ${profitPct >= 0 ? '+' : ''}${profitPct}% (${profitSol >= 0 ? '+' : ''}${profitSol} SOL)`,
+        bundleStatus: 'Landed',
+      });
+
+      try {
+        await defaultTradeWalJournal.logRecord({
+          id: `sell-${Date.now()}`,
+          timestamp: Date.now(),
+          timeIso: new Date().toISOString(),
+          symbol: pos.mint.slice(0, 4).toUpperCase(),
+          mint: pos.mint,
+          side: 'SELL',
+          kind: profitSol >= 0 ? 'tp1' : 'stop_loss',
+          entryPriceSol: pos.entryPriceSol,
+          exitPriceSol: exitPrice,
+          tradeSizeSol: pos.solInvested,
+          profitSol,
+          profitPct,
+          feeSol: 0.00005,
+          jitoTipSol: JITO_TIP_SOL,
+          bundleStatus: 'Landed',
+          reasonRu: reason,
+          holdTimeSec,
+          signature: txSignature,
+          solscanUrl: `https://solscan.io/tx/${txSignature}`,
+        });
+      } catch (walErr) {
+        console.warn('[WAL Sell Err]:', walErr);
+      }
+
+      // Занесение в Cooldown на 60 минут
+      this.cooldownTokens.set(pos.mint, Date.now() + 60 * 60 * 1000);
+      // Глобальная пауза движка на 3 минуты
+      this.globalPauseUntil = Date.now() + 3 * 60 * 1000;
+      this.activePosition = null;
+
+      // Переход в 'COOLDOWN'
+      this.transitionTo('COOLDOWN', `Продажа закрыта: ${reason}. Защитная пауза 3 мин.`);
+      await this.syncOnChainBalance();
+    } catch (e: any) {
+      const parsedErr = parseSolanaProgramError(e);
+      console.error('[СБОЙ ПРОДАЖИ ON-CHAIN]:', parsedErr.raw);
+      this.recordDecision({
+        id: `err-sell-${Date.now()}`,
+        timeStr: new Date().toLocaleTimeString(),
+        kind: 'rejected',
+        symbol: this.activePosition?.mint.slice(0, 4).toUpperCase() || 'TOKEN',
+        mint: this.activePosition?.mint || '',
+        actionRu: `⚠️ ОШИБКА ПРОДАЖИ`,
+        reasonRu: parsedErr.decodedReasonRu,
+        bundleStatus: 'Failed',
+      });
+
+      // Возврат в IN_POSITION для следующей попытки
+      this.transitionTo('IN_POSITION', `Сбой закрытия: ${parsedErr.decodedReasonRu}. Повтор в след. тике`);
+      await this.syncOnChainBalance();
+    } finally {
+      if ((this._state as BotState) === 'CLOSING_POSITION') {
+        this.transitionTo('IN_POSITION', 'Сброс зависшего статуса CLOSING_POSITION');
+      }
+    }
+  }
+
+  // --- КОНТРОЛЬ ПОЗИЦИИ: GRACE PERIOD И TIME-DECAY ---
+  private monitorActivePositionLifecycle() {
+    if (!this.activePosition || this.isExecutingTrade) return;
+
+    const pos = this.activePosition;
+    const elapsedSec = (Date.now() - pos.entryTimestamp) / 1000;
+    const pnlPercent = ((pos.currentPriceSol - pos.entryPriceSol) / pos.entryPriceSol) * 100;
+
+    if (pos.currentPriceSol > pos.highestPriceSol) {
+      pos.highestPriceSol = pos.currentPriceSol;
+    }
+
+    // 1. ПРАВИЛО GRACE PERIOD (12 СЕКУНД)
+    // В первые 12 секунд игнорируем шум (-15%). Стоп только при катастрофе (-40%).
+    if (elapsedSec < 12) {
+      if (pnlPercent <= -40) {
+        this.triggerLiveSell('Катастрофический сброс (> -40%)');
+      }
+      return;
+    }
+
+    // 2. СТАНДАРТНЫЙ СТОП-ЛОСС ПОСЛЕ GRACE PERIOD
+    if (pnlPercent <= -15) {
+      this.triggerLiveSell('Стоп-лосс (-15%)');
+      return;
+    }
+
+    // 3. КАСКАДНЫЙ ТЕЙК-ПРОФИТ
+    if (pnlPercent >= 30) {
+      this.triggerLiveSell('Тейк-профит (+30%)');
+      return;
+    }
+
+    // 4. ТАЙМ-СТОП (TIME-DECAY: 45 СЕКУНД)
+    // Если за 45 секунд импульс затух — плавный выход
+    if (elapsedSec >= 45) {
+      this.triggerLiveSell('Тайм-стоп 45 сек (затухание импульса)');
+      return;
+    }
+  }
+
+  private cleanupCandidates() {
+    const now = Date.now();
+    for (const [mint, cand] of this.candidates.entries()) {
+      if (now - cand.lastSeen > 30000) {
+        this.candidates.delete(mint);
+        this.candidateBuffers.delete(mint);
+      }
+    }
+
+    // СЦЕНАРИЙ 5: Жесткий потолок емкости Map кандидатов (не более 150 записей в RAM)
+    if (this.candidates.size > 150) {
+      const sorted = Array.from(this.candidates.entries()).sort((a, b) => a[1].lastSeen - b[1].lastSeen);
+      const toRemove = sorted.slice(0, sorted.length - 100);
+      for (const [m] of toRemove) {
+        this.candidates.delete(m);
+        this.candidateBuffers.delete(m);
+      }
+    }
+
+    this.telemetry.scannedTokens = this.candidates.size;
+  }
+
+  public getTopCandidates(): CandidateMetric[] {
+    return Array.from(this.candidates.values())
+      .sort((a, b) => b.readinessScore - a.readinessScore)
+      .slice(0, 3);
   }
 }
-

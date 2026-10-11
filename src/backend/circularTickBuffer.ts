@@ -242,20 +242,36 @@ export class CircularTickBuffer {
   /**
    * Strategy: Corridor Hunter 6-25 SOL & Net Inflow Analysis
    * Entry trigger requirements:
-   * 1) netSolInflow >= 1.5 SOL over 5s window
-   * 2) uniqueBuyersCount >= 4 unique buyers
-   * 3) Current price is within 5% of max price over last 30s
+   * 1) Bonding curve reserve strictly in safe corridor: 6.0 - 25.0 SOL
+   * 2) netSolInflow >= 1.5 SOL over 5s window
+   * 3) uniqueBuyersCount >= 4 unique buyers with volume >= 0.01 SOL
+   * 4) Current price is within 5% of max price over last 30s
    */
-  public evaluateCorridorNetInflowEntry(): {
+  public evaluateCorridorNetInflowEntry(bondingCurveSol?: number): {
     isSignalValid: boolean;
+    bondingSol: number;
     netSolInflow: number;
     uniqueBuyersCount: number;
     priceNearPeak: boolean;
     reasonRu: string;
   } {
+    const currentTick = this.getLatestTick();
+    const currentBondingSol = bondingCurveSol ?? currentTick?.solReserve ?? currentTick?.priceSol ?? 0;
+
+    // Strict Corridor check 6.0 - 25.0 SOL
+    if (currentBondingSol < 6.0 || currentBondingSol > 25.0) {
+      return {
+        isSignalValid: false,
+        bondingSol: currentBondingSol,
+        netSolInflow: 0,
+        uniqueBuyersCount: 0,
+        priceNearPeak: false,
+        reasonRu: `Вне коридора 6–25 SOL: баланс кривой ${currentBondingSol.toFixed(2)} SOL`,
+      };
+    }
+
     const { netSolInflow, uniqueBuyersCount } = this.calculateNetInflowAndBuyers(5000);
     const maxPrice30s = this.getMaxPriceInWindow(30000);
-    const currentTick = this.getLatestTick();
     const currentPrice = currentTick?.priceSol || 0;
 
     const priceNearPeak = maxPrice30s > 0 ? currentPrice >= maxPrice30s * 0.95 : true;
@@ -263,6 +279,7 @@ export class CircularTickBuffer {
     if (netSolInflow < 1.5) {
       return {
         isSignalValid: false,
+        bondingSol: currentBondingSol,
         netSolInflow,
         uniqueBuyersCount,
         priceNearPeak,
@@ -273,6 +290,7 @@ export class CircularTickBuffer {
     if (uniqueBuyersCount < 4) {
       return {
         isSignalValid: false,
+        bondingSol: currentBondingSol,
         netSolInflow,
         uniqueBuyersCount,
         priceNearPeak,
@@ -283,6 +301,7 @@ export class CircularTickBuffer {
     if (!priceNearPeak) {
       return {
         isSignalValid: false,
+        bondingSol: currentBondingSol,
         netSolInflow,
         uniqueBuyersCount,
         priceNearPeak: false,
@@ -292,10 +311,33 @@ export class CircularTickBuffer {
 
     return {
       isSignalValid: true,
+      bondingSol: currentBondingSol,
       netSolInflow,
       uniqueBuyersCount,
       priceNearPeak: true,
-      reasonRu: `ВХОД ПО ПРИТОКУ: +${netSolInflow.toFixed(2)} SOL/5с, Покупателей: ${uniqueBuyersCount}, Около пика`,
+      reasonRu: `ВХОД ПО ПРИТОКУ: Кривая ${currentBondingSol.toFixed(1)} SOL, +${netSolInflow.toFixed(2)} SOL/5с, Покупателей: ${uniqueBuyersCount}`,
+    };
+  }
+
+  /**
+   * CTO (Community Takeover) Absorption Evaluator:
+   * Dev dump does NOT disqualify coin if net inflow over 10s exceeds dev dump volume.
+   */
+  public evaluateCtoAbsorption(devSoldSol: number, windowMs: number = 10000): {
+    isAbsorbed: boolean;
+    netInflow10s: number;
+    devSoldSol: number;
+    reasonRu: string;
+  } {
+    const { netSolInflow } = this.calculateNetInflowAndBuyers(windowMs);
+    const isAbsorbed = netSolInflow > devSoldSol;
+    return {
+      isAbsorbed,
+      netInflow10s: netSolInflow,
+      devSoldSol,
+      reasonRu: isAbsorbed
+        ? `⚡ CTO АБСОРБЦИЯ: Сброс дева ${devSoldSol.toFixed(2)} SOL поглощен рынком (приток +${netSolInflow.toFixed(2)} SOL)`
+        : `Пролив дева не поглощен: сброс ${devSoldSol.toFixed(2)} SOL превышает приток +${netSolInflow.toFixed(2)} SOL`,
     };
   }
 
