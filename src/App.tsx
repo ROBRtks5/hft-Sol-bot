@@ -17,7 +17,8 @@ import { EngineBackend, EngineStateV2, BotState } from './backend';
 import { LiveApkAdapter, CandidateMetric } from './backend/liveApkAdapter';
 import { defaultTradeWalJournal, WalTradeRecord } from './backend/tradeWalJournal';
 import { SecureStorage, convertHttpToWsUrl } from './secureStorage';
-import { TargetMetric } from './types/backend';
+import { TargetMetric, RiskSettings } from './types/backend';
+import { hapticFeedback } from './utils/haptics';
 
 type Tab = 'control' | 'journal' | 'settings';
 
@@ -38,6 +39,7 @@ export default function App() {
   const [topTargets, setTopTargets] = useState<CandidateMetric[]>([]);
   const [liveBalance, setLiveBalance] = useState<number>(0);
   const [rpcInput, setRpcInput] = useState<string>(() => EngineBackend.getCustomRpcUrl?.() || '');
+  const [riskSettings, setRiskSettings] = useState<RiskSettings>(() => SecureStorage.getRiskSettings());
   const lastActionTimestampRef = React.useRef<number>(0);
 
   // СЦЕНАРИЙ 1: Защита от дребезга контактов и спама кнопками (debounce 400 мс)
@@ -114,6 +116,7 @@ export default function App() {
   }, []);
 
   const handleSaveRpc = async () => {
+    hapticFeedback('medium');
     if (EngineBackend.setCustomRpcUrl) {
       await EngineBackend.setCustomRpcUrl(rpcInput);
       triggerToast('RPC узел сохранен и переподключен');
@@ -128,6 +131,7 @@ export default function App() {
 
   const handleCopyAddress = () => {
     if (!publicAddress) return;
+    hapticFeedback('light');
     navigator.clipboard.writeText(publicAddress);
     setCopied(true);
     triggerToast('Адрес скопирован в буфер');
@@ -136,15 +140,18 @@ export default function App() {
 
   const handleStartTrading = async () => {
     if (!checkDebounce(400) || isActionPending) return;
+    hapticFeedback('medium');
     setIsActionPending(true);
     try {
       const res = await EngineBackend.startEngine('MICRO_LIVE');
       if (res.success) {
         triggerToast('Боевой режим MICRO_LIVE запущен.');
       } else {
+        hapticFeedback('error');
         triggerToast(res.reasonRu || 'Ошибка запуска.');
       }
     } catch (e: any) {
+      hapticFeedback('error');
       triggerToast(e?.message || 'Ошибка запуска');
     } finally {
       setIsActionPending(false);
@@ -153,11 +160,13 @@ export default function App() {
 
   const handlePauseTrading = async () => {
     if (!checkDebounce(400) || isActionPending) return;
+    hapticFeedback('medium');
     setIsActionPending(true);
     try {
       await EngineBackend.pauseEngine();
       triggerToast('Робот переведен на паузу.');
     } catch (e: any) {
+      hapticFeedback('error');
       triggerToast(e?.message || 'Ошибка остановки');
     } finally {
       setIsActionPending(false);
@@ -166,11 +175,13 @@ export default function App() {
 
   const handleEmergencyStop = async () => {
     if (!checkDebounce(400) || isActionPending) return;
+    hapticFeedback('heavy');
     setIsActionPending(true);
     try {
       await EngineBackend.emergencyKill();
       triggerToast('АВАРИЙНЫЙ СТОП: все операции мгновенно остановлены.');
     } catch (e: any) {
+      hapticFeedback('error');
       triggerToast(e?.message || 'Ошибка аварийной остановки');
     } finally {
       setIsActionPending(false);
@@ -178,6 +189,7 @@ export default function App() {
   };
 
   const handleExportCsv = async () => {
+    hapticFeedback('light');
     const hasAnyTrades = (engine.closedDeals && engine.closedDeals.length > 0) || (engine.decisions && engine.decisions.length > 0);
     if (!hasAnyTrades) {
       triggerToast('Журнал пуст');
@@ -199,11 +211,13 @@ export default function App() {
     setSeedError(null);
     const validation = SecureStorage.validateMnemonicPhrase(seedInput);
     if (!validation.valid) {
+      hapticFeedback('error');
       setSeedError(validation.errorRu || 'Некорректная сид-фраза');
       return;
     }
     const res = await SecureStorage.storeSeed(seedInput);
     if (res.success) {
+      hapticFeedback('medium');
       triggerToast('Торговый ключ успешно импортирован в Keystore');
       setIsImportModalOpen(false);
       setSeedInput('');
@@ -216,6 +230,7 @@ export default function App() {
         await EngineBackend.syncRealAccount();
       }
     } else {
+      hapticFeedback('error');
       setSeedError(res.errorRu || 'Ошибка сохранения ключа');
     }
   };
@@ -227,15 +242,18 @@ export default function App() {
 
     // СЦЕНАРИЙ 1: Защита от удаления ключа во время in-flight ордера
     if (live.state === 'SUBMITTING_ORDER' || live.state === 'CLOSING_POSITION') {
+      hapticFeedback('error');
       triggerToast('Дождитесь подтверждения отправленного ордера или нажмите Аварийный стоп');
       return;
     }
 
     if (live.activePosition) {
+      hapticFeedback('error');
       triggerToast('Сначала закройте открытую позицию через Аварийный стоп');
       return;
     }
 
+    hapticFeedback('heavy');
     setIsActionPending(true);
     try {
       // 1. Безопасный разрыв сетевых соединений и остановка таймеров
@@ -263,39 +281,78 @@ export default function App() {
     }
   };
 
-  const handleSetRiskLimit = async (param: 'maxTradeSol' | 'maxDailyLossSol' | 'maxConsecutiveLosses', value: number) => {
-    try {
-      if (EngineBackend.setRiskLimits) {
-        await EngineBackend.setRiskLimits({ [param]: value });
+  // Реактивное обновление настроек риска со сквозной синхронизацией UI и адаптера
+  const handleUpdateRisk = async (patch: Partial<RiskSettings>) => {
+    hapticFeedback('selection');
+    
+    // Синхронное обновление реактивного стейта с функциональным сеттером и приведением к Number
+    setRiskSettings((prev) => {
+      const updated: RiskSettings = { ...prev };
+      if (patch.tradeSizeSol !== undefined) {
+        const val = Number(patch.tradeSizeSol);
+        updated.tradeSizeSol = val;
+        LiveApkAdapter.getInstance().setTradeSize(val);
       }
-      triggerToast(`Лимит обновлен: ${param === 'maxTradeSol' ? 'Сделка' : param === 'maxDailyLossSol' ? 'Стоп' : 'Убытков'} = ${value}`);
+      if (patch.dailyStopSol !== undefined) {
+        const val = Number(patch.dailyStopSol);
+        updated.dailyStopSol = val;
+        LiveApkAdapter.getInstance().setDailyStop(val);
+      }
+      if (patch.maxLossStreak !== undefined) {
+        const val = Number(patch.maxLossStreak);
+        updated.maxLossStreak = val;
+        LiveApkAdapter.getInstance().setMaxLossStreak(val);
+      }
+      if (patch.gasProfile !== undefined) {
+        updated.gasProfile = patch.gasProfile;
+      }
+      SecureStorage.saveRiskSettings(updated);
+      LiveApkAdapter.getInstance().setRiskSettings(updated);
+      return updated;
+    });
+
+    try {
+      const live = LiveApkAdapter.getInstance();
+      const current = live.riskSettings;
+      if (EngineBackend.setRiskLimits) {
+        await EngineBackend.setRiskLimits({
+          maxTradeSol: current.tradeSizeSol,
+          maxDailyLossSol: current.dailyStopSol,
+          maxConsecutiveLosses: current.maxLossStreak,
+        });
+      }
+
+      if (patch.gasProfile) {
+        let maxFee = 0.00005;
+        let tip = 0.00003;
+        let urgency: 'ECONOMY' | 'FAST' | 'TURBO' = 'ECONOMY';
+        if (patch.gasProfile === 'BALANCED') {
+          urgency = 'FAST';
+          maxFee = 0.0001;
+          tip = 0.00008;
+        } else if (patch.gasProfile === 'TURBO') {
+          urgency = 'TURBO';
+          maxFee = 0.0002;
+          tip = 0.00015;
+        }
+        await EngineBackend.setCommissionPolicy({
+          urgencyLevel: urgency,
+          maxFeeSol: maxFee,
+          referenceFastTipSol: tip,
+        });
+      }
+
+      if (patch.tradeSizeSol !== undefined) {
+        triggerToast(`Сделка = ${Number(patch.tradeSizeSol)} SOL`);
+      } else if (patch.dailyStopSol !== undefined) {
+        triggerToast(`Дневной стоп = ${Number(patch.dailyStopSol).toFixed(2)} SOL`);
+      } else if (patch.maxLossStreak !== undefined) {
+        triggerToast(`Серия убытков = ${Number(patch.maxLossStreak)}`);
+      } else if (patch.gasProfile !== undefined) {
+        triggerToast(`Комиссия: ${patch.gasProfile}`);
+      }
     } catch (e: any) {
       triggerToast(e?.message || 'Ошибка обновления лимита');
-    }
-  };
-
-  const handleSetCommissionLevel = async (level: 'ECONOMY' | 'BALANCED' | 'TURBO') => {
-    let maxFee = 0.00005;
-    let tip = 0.00003;
-    let urgency: 'ECONOMY' | 'FAST' | 'TURBO' = 'ECONOMY';
-    if (level === 'BALANCED') {
-      urgency = 'FAST';
-      maxFee = 0.0001;
-      tip = 0.00008;
-    } else if (level === 'TURBO') {
-      urgency = 'TURBO';
-      maxFee = 0.0002;
-      tip = 0.00015;
-    }
-    try {
-      await EngineBackend.setCommissionPolicy({
-        urgencyLevel: urgency,
-        maxFeeSol: maxFee,
-        referenceFastTipSol: tip,
-      });
-      triggerToast(`Комиссия: ${level} (потолок ${maxFee} SOL)`);
-    } catch (e: any) {
-      triggerToast(e?.message || 'Ошибка установки комиссии');
     }
   };
 
@@ -311,11 +368,6 @@ export default function App() {
 
   const isTrading = botState === 'SCANNING' || botState === 'SUBMITTING_ORDER' || botState === 'IN_POSITION' || botState === 'CLOSING_POSITION' || botState === 'COOLDOWN';
   const isKilled = botState === 'TERMINATED' || engine.mode === 'KILLED';
-
-  // Live Risk parameters from engine (defaults: 0.02 SOL, 0.10 SOL, 3)
-  const currentMaxTradeSol = engine.microLive?.maxTradeSol ?? 0.02;
-  const currentMaxDailyLossSol = engine.microLive?.maxDailyLossSol ?? 0.10;
-  const currentMaxConsecutiveLosses = engine.microLive?.maxConsecutiveLosses ?? 3;
 
   let statusLabel = 'НА ПАУЗЕ';
   let statusReason = '';
@@ -637,7 +689,10 @@ export default function App() {
               </h2>
               <div className="flex bg-[#0d1218] p-1 rounded-lg border border-slate-800 text-[11px] font-mono space-x-1">
                 <button
-                  onClick={() => setJournalSubTab('trades')}
+                  onClick={() => {
+                    hapticFeedback('selection');
+                    setJournalSubTab('trades');
+                  }}
                   className={`px-2.5 py-1 rounded-md font-bold transition-all cursor-pointer ${
                     journalSubTab === 'trades'
                       ? 'bg-slate-700 text-white shadow-sm'
@@ -647,7 +702,10 @@ export default function App() {
                   [ СДЕЛКИ ]
                 </button>
                 <button
-                  onClick={() => setJournalSubTab('radar')}
+                  onClick={() => {
+                    hapticFeedback('selection');
+                    setJournalSubTab('radar');
+                  }}
                   className={`px-2.5 py-1 rounded-md font-bold transition-all cursor-pointer ${
                     journalSubTab === 'radar'
                       ? 'bg-slate-700 text-white shadow-sm'
@@ -1000,7 +1058,10 @@ export default function App() {
               <div className="pt-1 flex flex-col space-y-2">
                 {!hasStoredKey ? (
                   <button
-                    onClick={() => setIsImportModalOpen(true)}
+                    onClick={() => {
+                      hapticFeedback('light');
+                      setIsImportModalOpen(true);
+                    }}
                     className="w-full py-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 text-xs font-bold rounded-lg border border-emerald-500/30 cursor-pointer transition-all flex items-center justify-center space-x-1.5"
                   >
                     <Key className="w-3.5 h-3.5" />
@@ -1029,14 +1090,14 @@ export default function App() {
                   <span>• Размер сделки:</span>
                   <div className="flex items-center space-x-1">
                     {[0.01, 0.02, 0.05].map((val) => {
-                      const isActive = Math.abs(currentMaxTradeSol - val) < 0.005;
+                      const isActive = Math.abs(Number(riskSettings.tradeSizeSol) - Number(val)) < 0.001;
                       return (
                         <button
                           key={val}
-                          onClick={() => handleSetRiskLimit('maxTradeSol', val)}
+                          onClick={() => handleUpdateRisk({ tradeSizeSol: Number(val) })}
                           className={`px-2 py-0.5 rounded text-[11px] cursor-pointer transition-all border ${
                             isActive
-                              ? 'bg-emerald-600 text-white border-emerald-500 font-bold'
+                              ? 'bg-emerald-600 text-white border-emerald-500 font-bold shadow-sm'
                               : 'bg-[#1a232d] text-slate-400 border-slate-700 hover:text-slate-200'
                           }`}
                         >
@@ -1052,14 +1113,14 @@ export default function App() {
                   <span>• Дневной стоп:</span>
                   <div className="flex items-center space-x-1">
                     {[0.05, 0.10, 0.20].map((val) => {
-                      const isActive = Math.abs(currentMaxDailyLossSol - val) < 0.005;
+                      const isActive = Math.abs(Number(riskSettings.dailyStopSol) - Number(val)) < 0.001;
                       return (
                         <button
                           key={val}
-                          onClick={() => handleSetRiskLimit('maxDailyLossSol', val)}
+                          onClick={() => handleUpdateRisk({ dailyStopSol: Number(val) })}
                           className={`px-2 py-0.5 rounded text-[11px] cursor-pointer transition-all border ${
                             isActive
-                              ? 'bg-emerald-600 text-white border-emerald-500 font-bold'
+                              ? 'bg-emerald-600 text-white border-emerald-500 font-bold shadow-sm'
                               : 'bg-[#1a232d] text-slate-400 border-slate-700 hover:text-slate-200'
                           }`}
                         >
@@ -1075,14 +1136,14 @@ export default function App() {
                   <span>• Серия убытков:</span>
                   <div className="flex items-center space-x-1">
                     {[2, 3, 5].map((val) => {
-                      const isActive = currentMaxConsecutiveLosses === val;
+                      const isActive = Number(riskSettings.maxLossStreak) === Number(val);
                       return (
                         <button
                           key={val}
-                          onClick={() => handleSetRiskLimit('maxConsecutiveLosses', val)}
+                          onClick={() => handleUpdateRisk({ maxLossStreak: Number(val) })}
                           className={`px-2.5 py-0.5 rounded text-[11px] cursor-pointer transition-all border ${
                             isActive
-                              ? 'bg-emerald-600 text-white border-emerald-500 font-bold'
+                              ? 'bg-emerald-600 text-white border-emerald-500 font-bold shadow-sm'
                               : 'bg-[#1a232d] text-slate-400 border-slate-700 hover:text-slate-200'
                           }`}
                         >
@@ -1102,40 +1163,27 @@ export default function App() {
               </h3>
               
               <div className="grid grid-cols-3 gap-2">
-                <button
-                  onClick={() => handleSetCommissionLevel('ECONOMY')}
-                  className={`py-2 text-xs font-bold rounded-lg border transition-all cursor-pointer ${
-                    (engine.gas?.urgencyLevel === 'ECONOMY' || engine.gas?.maxFeeSol === 0.00005)
-                      ? 'bg-emerald-600 text-white border-emerald-500'
-                      : 'bg-[#1a232d] text-slate-400 border-slate-700 hover:text-slate-200'
-                  }`}
-                >
-                  ЭКОНОМ
-                </button>
-                <button
-                  onClick={() => handleSetCommissionLevel('BALANCED')}
-                  className={`py-2 text-xs font-bold rounded-lg border transition-all cursor-pointer ${
-                    (engine.gas?.urgencyLevel === 'FAST' || engine.gas?.maxFeeSol === 0.0001)
-                      ? 'bg-emerald-600 text-white border-emerald-500'
-                      : 'bg-[#1a232d] text-slate-400 border-slate-700 hover:text-slate-200'
-                  }`}
-                >
-                  БАЛАНС
-                </button>
-                <button
-                  onClick={() => handleSetCommissionLevel('TURBO')}
-                  className={`py-2 text-xs font-bold rounded-lg border transition-all cursor-pointer ${
-                    (engine.gas?.urgencyLevel === 'TURBO' || engine.gas?.maxFeeSol === 0.0002)
-                      ? 'bg-emerald-600 text-white border-emerald-500'
-                      : 'bg-[#1a232d] text-slate-400 border-slate-700 hover:text-slate-200'
-                  }`}
-                >
-                  ТУРБО
-                </button>
+                {(['ECONOMY', 'BALANCED', 'TURBO'] as const).map((level) => {
+                  const labelRu = level === 'ECONOMY' ? 'ЭКОНОМ' : level === 'BALANCED' ? 'БАЛАНС' : 'ТУРБО';
+                  const isActive = riskSettings.gasProfile === level;
+                  return (
+                    <button
+                      key={level}
+                      onClick={() => handleUpdateRisk({ gasProfile: level })}
+                      className={`py-2 text-xs font-bold rounded-lg border transition-all cursor-pointer ${
+                        isActive
+                          ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm'
+                          : 'bg-[#1a232d] text-slate-400 border-slate-700 hover:text-slate-200'
+                      }`}
+                    >
+                      {labelRu}
+                    </button>
+                  );
+                })}
               </div>
 
               <div className="text-xs font-mono text-slate-400">
-                Потолок: <span className="text-slate-200 font-bold">{engine.gas?.maxFeeSol || 0.00005} SOL</span>
+                Потолок: <span className="text-slate-200 font-bold">{engine.gas?.maxFeeSol || (riskSettings.gasProfile === 'TURBO' ? 0.0002 : riskSettings.gasProfile === 'BALANCED' ? 0.0001 : 0.00005)} SOL</span>
               </div>
             </div>
 
@@ -1190,7 +1238,10 @@ export default function App() {
       {/* Bottom Navigation Bar: EXACTLY 3 TABS */}
       <nav className="shrink-0 border-t border-[#16202a] bg-[#0c1117] px-6 pt-2 pb-[max(env(safe-area-inset-bottom,0px),10px)] flex justify-between items-center z-30">
         <button
-          onClick={() => setActiveTab('control')}
+          onClick={() => {
+            hapticFeedback('selection');
+            setActiveTab('control');
+          }}
           className={`flex flex-col items-center space-y-1 py-1 cursor-pointer transition-colors ${
             activeTab === 'control' ? 'text-emerald-400' : 'text-slate-500 hover:text-slate-300'
           }`}
@@ -1200,7 +1251,10 @@ export default function App() {
         </button>
 
         <button
-          onClick={() => setActiveTab('journal')}
+          onClick={() => {
+            hapticFeedback('selection');
+            setActiveTab('journal');
+          }}
           className={`flex flex-col items-center space-y-1 py-1 cursor-pointer transition-colors ${
             activeTab === 'journal' ? 'text-emerald-400' : 'text-slate-500 hover:text-slate-300'
           }`}
@@ -1210,7 +1264,10 @@ export default function App() {
         </button>
 
         <button
-          onClick={() => setActiveTab('settings')}
+          onClick={() => {
+            hapticFeedback('selection');
+            setActiveTab('settings');
+          }}
           className={`flex flex-col items-center space-y-1 py-1 cursor-pointer transition-colors ${
             activeTab === 'settings' ? 'text-emerald-400' : 'text-slate-500 hover:text-slate-300'
           }`}
@@ -1230,7 +1287,10 @@ export default function App() {
                 <span>Импорт сид-фразы</span>
               </h3>
               <button 
-                onClick={() => setIsImportModalOpen(false)}
+                onClick={() => {
+                  hapticFeedback('light');
+                  setIsImportModalOpen(false);
+                }}
                 className="text-slate-400 hover:text-slate-100 p-1 cursor-pointer"
               >
                 <X className="w-4 h-4" />
@@ -1256,7 +1316,10 @@ export default function App() {
 
             <div className="flex space-x-2 pt-1">
               <button
-                onClick={() => setIsImportModalOpen(false)}
+                onClick={() => {
+                  hapticFeedback('light');
+                  setIsImportModalOpen(false);
+                }}
                 className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold rounded-xl cursor-pointer"
               >
                 Отмена

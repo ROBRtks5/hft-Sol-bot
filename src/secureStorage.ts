@@ -3,6 +3,15 @@ import * as bip39 from 'bip39';
 import { derivePath } from 'ed25519-hd-key';
 import { Capacitor } from '@capacitor/core';
 import { NativeBiometric } from '@capgo/capacitor-native-biometric';
+import { RiskSettings } from './types/backend';
+
+export const DEFAULT_RISK_SETTINGS: RiskSettings = {
+  tradeSizeSol: 0.02,
+  dailyStopSol: 0.10,
+  maxLossStreak: 3,
+  gasProfile: 'BALANCED',
+  rpcUrl: '',
+};
 
 /**
  * АДАПТЕР БЕЗОПАСНОГО АППАРАТНОГО ХРАНИЛИЩА КЛЮЧЕЙ НА ТЕЛЕФОНЕ (Stage 29-FIX)
@@ -352,6 +361,39 @@ class MobileSecureStorageService implements SecureStorageAdapter {
       }
     } catch {
       // ignore
+    }
+  }
+
+  public getRiskSettings(): RiskSettings {
+    try {
+      const raw = localStorage.getItem('__alpha_risk_settings_v3');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        return {
+          tradeSizeSol: typeof parsed.tradeSizeSol === 'number' ? parsed.tradeSizeSol : DEFAULT_RISK_SETTINGS.tradeSizeSol,
+          dailyStopSol: typeof parsed.dailyStopSol === 'number' ? parsed.dailyStopSol : DEFAULT_RISK_SETTINGS.dailyStopSol,
+          maxLossStreak: typeof parsed.maxLossStreak === 'number' ? parsed.maxLossStreak : DEFAULT_RISK_SETTINGS.maxLossStreak,
+          gasProfile: (parsed.gasProfile === 'ECONOMY' || parsed.gasProfile === 'TURBO' || parsed.gasProfile === 'BALANCED') ? parsed.gasProfile : DEFAULT_RISK_SETTINGS.gasProfile,
+          rpcUrl: typeof parsed.rpcUrl === 'string' ? parsed.rpcUrl : DEFAULT_RISK_SETTINGS.rpcUrl,
+        };
+      }
+    } catch {
+      // ignore
+    }
+    return { ...DEFAULT_RISK_SETTINGS };
+  }
+
+  public saveRiskSettings(settings: Partial<RiskSettings>): RiskSettings {
+    try {
+      const current = this.getRiskSettings();
+      const updated: RiskSettings = {
+        ...current,
+        ...settings,
+      };
+      localStorage.setItem('__alpha_risk_settings_v3', JSON.stringify(updated));
+      return updated;
+    } catch {
+      return { ...DEFAULT_RISK_SETTINGS, ...settings };
     }
   }
 }

@@ -9,8 +9,9 @@ import {
   LAMPORTS_PER_SOL
 } from '@solana/web3.js';
 import { defaultTradeWalJournal } from './tradeWalJournal';
-import { DecisionItem, BotState } from '../types/backend';
+import { DecisionItem, BotState, RiskSettings } from '../types/backend';
 import { CircularTickBuffer } from './circularTickBuffer';
+import { SecureStorage } from '../secureStorage';
 
 export type { BotState } from '../types/backend';
 
@@ -376,7 +377,130 @@ export class LiveApkAdapter {
 
   private pollInterval: any = null;
 
-  private constructor() {}
+  // Динамические параметры риска и комиссий
+  private currentTradeSizeSol: number = 0.02;
+  private currentDailyStopSol: number = 0.10;
+  private currentMaxLossStreak: number = 3;
+  private currentGasProfile: 'ECONOMY' | 'BALANCED' | 'TURBO' = 'BALANCED';
+  private currentJitoTipSol: number = 0.00008;
+  private currentMaxGasFeeSol: number = 0.00010;
+
+  // Single In-Flight Mutex: синхронная блокировка параллельной отправки двух ордеров
+  private isOrderInFlight: boolean = false;
+
+  private constructor() {
+    try {
+      const saved = SecureStorage.getRiskSettings();
+      this.applyRiskSettings(saved);
+    } catch {
+      // defaults
+    }
+  }
+
+  public get orderInFlight(): boolean {
+    return this.isOrderInFlight;
+  }
+
+  public get tradeSizeSol(): number {
+    return this.currentTradeSizeSol;
+  }
+
+  public get dailyStopSol(): number {
+    return this.currentDailyStopSol;
+  }
+
+  public get maxLossStreak(): number {
+    return this.currentMaxLossStreak;
+  }
+
+  public get gasProfile(): 'ECONOMY' | 'BALANCED' | 'TURBO' {
+    return this.currentGasProfile;
+  }
+
+  public get jitoTipSol(): number {
+    return this.currentJitoTipSol;
+  }
+
+  public get maxGasFeeSol(): number {
+    return this.currentMaxGasFeeSol;
+  }
+
+  public get riskSettings(): RiskSettings {
+    return {
+      tradeSizeSol: this.currentTradeSizeSol,
+      dailyStopSol: this.currentDailyStopSol,
+      maxLossStreak: this.currentMaxLossStreak,
+      gasProfile: this.currentGasProfile,
+      rpcUrl: this.connection?.rpcEndpoint || '',
+    };
+  }
+
+  public setTradeSize(val: number): void {
+    const num = Number(val);
+    if (!isNaN(num) && num > 0) {
+      this.currentTradeSizeSol = num;
+      SecureStorage.saveRiskSettings({ tradeSizeSol: num });
+      this.notifyRiskChange();
+    }
+  }
+
+  public setDailyStop(val: number): void {
+    const num = Number(val);
+    if (!isNaN(num) && num > 0) {
+      this.currentDailyStopSol = num;
+      SecureStorage.saveRiskSettings({ dailyStopSol: num });
+      this.notifyRiskChange();
+    }
+  }
+
+  public setMaxLossStreak(val: number): void {
+    const num = Number(val);
+    if (!isNaN(num) && num > 0) {
+      this.currentMaxLossStreak = num;
+      SecureStorage.saveRiskSettings({ maxLossStreak: num });
+      this.notifyRiskChange();
+    }
+  }
+
+  public setRiskSettings(settings: Partial<RiskSettings>): void {
+    this.applyRiskSettings(settings);
+    this.notifyRiskChange();
+  }
+
+  private notifyRiskChange(): void {
+    this.stateListeners.forEach((listener) => {
+      try {
+        listener(this._state, this._state, 'Параметры риска обновлены');
+      } catch {
+        // ignore
+      }
+    });
+  }
+
+  private applyRiskSettings(settings: Partial<RiskSettings>): void {
+    if (typeof settings.tradeSizeSol === 'number' && settings.tradeSizeSol > 0) {
+      this.currentTradeSizeSol = settings.tradeSizeSol;
+    }
+    if (typeof settings.dailyStopSol === 'number' && settings.dailyStopSol > 0) {
+      this.currentDailyStopSol = settings.dailyStopSol;
+    }
+    if (typeof settings.maxLossStreak === 'number' && settings.maxLossStreak > 0) {
+      this.currentMaxLossStreak = settings.maxLossStreak;
+    }
+    if (settings.gasProfile) {
+      this.currentGasProfile = settings.gasProfile;
+      if (settings.gasProfile === 'ECONOMY') {
+        this.currentJitoTipSol = 0.00003;
+        this.currentMaxGasFeeSol = 0.00005;
+      } else if (settings.gasProfile === 'TURBO') {
+        this.currentJitoTipSol = 0.00015;
+        this.currentMaxGasFeeSol = 0.00020;
+      } else {
+        this.currentJitoTipSol = 0.00008;
+        this.currentMaxGasFeeSol = 0.00010;
+      }
+    }
+  }
 
   public recordDecision(decision: DecisionItem) {
     this.decisions.unshift(decision);
@@ -809,7 +933,7 @@ export class LiveApkAdapter {
       cand.bondingSol <= 25.0 &&
       cand.netInflow5s >= 1.5 &&
       cand.uniqueBuyers >= 4 &&
-      this.balanceSol >= (TRADE_SIZE_SOL + MIN_RESERVE_SOL)
+      this.balanceSol >= (this.currentTradeSizeSol + MIN_RESERVE_SOL)
     ) {
       this.triggerLiveBuy(cand);
     }
@@ -891,7 +1015,7 @@ export class LiveApkAdapter {
     const tipIx = SystemProgram.transfer({
       fromPubkey: userPubkey,
       toPubkey: tipAccount,
-      lamports: Math.floor(JITO_TIP_SOL * LAMPORTS_PER_SOL), // 400 000 lamports (0.0004 SOL)
+      lamports: Math.floor(this.currentJitoTipSol * LAMPORTS_PER_SOL),
     });
     instructions.push(tipIx);
 
@@ -933,14 +1057,26 @@ export class LiveApkAdapter {
   }
 
   // --- БОЕВАЯ ПОКУПКА ТОКЕНА (FSM: SCANNING -> SUBMITTING_ORDER -> IN_POSITION / COOLDOWN) ---
+  public async executeBuyOrder(candidate: CandidateMetric): Promise<void> {
+    return this.triggerLiveBuy(candidate);
+  }
+
   private async triggerLiveBuy(candidate: CandidateMetric) {
+    // Single In-Flight Mutex: синхронная блокировка ДО первого асинхронного await
+    if (this.isOrderInFlight) {
+      console.warn('[Mutex Shield]: Попытка параллельной покупки заблокирована — ордер уже in-flight');
+      return;
+    }
+
     // Вход разрешен ТОЛЬКО из 'SCANNING'
     if (this._state !== 'SCANNING' || !this.connection || !this.keypair) {
       return;
     }
 
-    // Атомарный мьютекс входа: перевод в 'SUBMITTING_ORDER'
+    // Атомарный мьютекс входа: синхронный захват замка
+    this.isOrderInFlight = true;
     if (!this.transitionTo('SUBMITTING_ORDER', `Отправка бандла на покупку $${candidate.ticker}`)) {
+      this.isOrderInFlight = false;
       return;
     }
 
@@ -951,7 +1087,7 @@ export class LiveApkAdapter {
       symbol: candidate.ticker,
       mint: candidate.mint,
       actionRu: `🔥 [ВЫСТРЕЛ JITO] $${candidate.ticker}`,
-      reasonRu: `Отправка ончейн-бандла: ${TRADE_SIZE_SOL} SOL + Tip ${JITO_TIP_SOL} SOL`,
+      reasonRu: `Отправка ончейн-бандла: ${this.currentTradeSizeSol} SOL + Tip ${this.currentJitoTipSol} SOL`,
       bundleStatus: 'Pending',
     });
 
@@ -977,7 +1113,7 @@ export class LiveApkAdapter {
       const { solInLamports, minTokensWithSlippage, tokensOut } = calculatePumpTokensOut(
         virtualSolReserves,
         virtualTokenReserves,
-        TRADE_SIZE_SOL,
+        this.currentTradeSizeSol,
         2.5
       );
 
@@ -1050,7 +1186,7 @@ export class LiveApkAdapter {
       this.activePosition = {
         mint: candidate.mint,
         tokenAmount: tokensOut,
-        solInvested: TRADE_SIZE_SOL,
+        solInvested: this.currentTradeSizeSol,
         entryPriceSol: candidate.bondingSol,
         entryTimestamp: Date.now(),
         currentPriceSol: candidate.bondingSol,
@@ -1067,7 +1203,7 @@ export class LiveApkAdapter {
         symbol: candidate.ticker,
         mint: candidate.mint,
         actionRu: `🟢 [${landedStatusStr}] $${candidate.ticker}`,
-        reasonRu: `Ончейн TX: ${txSignature.slice(0, 8)}... (вход ${TRADE_SIZE_SOL} SOL, получено ~${(Number(tokensOut) / 1e6).toFixed(0)}k токенов)`,
+        reasonRu: `Ончейн TX: ${txSignature.slice(0, 8)}... (вход ${this.currentTradeSizeSol} SOL, получено ~${(Number(tokensOut) / 1e6).toFixed(0)}k токенов)`,
         bundleStatus: 'Landed',
       });
 
@@ -1083,11 +1219,11 @@ export class LiveApkAdapter {
           kind: 'bought',
           entryPriceSol: candidate.bondingSol,
           exitPriceSol: candidate.bondingSol,
-          tradeSizeSol: TRADE_SIZE_SOL,
+          tradeSizeSol: this.currentTradeSizeSol,
           profitSol: 0,
           profitPct: 0,
-          feeSol: 0.00005,
-          jitoTipSol: JITO_TIP_SOL,
+          feeSol: this.currentMaxGasFeeSol,
+          jitoTipSol: this.currentJitoTipSol,
           bundleStatus: 'Landed',
           reasonRu: `Вход в коридоре 6–25 SOL | ${landedStatusStr}`,
           signature: txSignature,
@@ -1122,7 +1258,9 @@ export class LiveApkAdapter {
 
       this.transitionTo('COOLDOWN', `Сбой покупки: ${parsedErr.decodedReasonRu}`);
     } finally {
-      // Страховка мьютекса
+      // Гарантированное освобождение мьютекса
+      this.isOrderInFlight = false;
+      // Страховка мьютекса FSM
       if ((this._state as BotState) === 'SUBMITTING_ORDER') {
         this.transitionTo('SCANNING', 'Сброс зависшего состояния SUBMITTING_ORDER');
       }
@@ -1130,13 +1268,25 @@ export class LiveApkAdapter {
   }
 
   // --- БОЕВАЯ ПРОДАЖА ТОКЕНА (FSM: IN_POSITION -> CLOSING_POSITION -> COOLDOWN) ---
+  public async executeSellOrder(reason: string): Promise<void> {
+    return this.triggerLiveSell(reason);
+  }
+
   public async triggerLiveSell(reason: string) {
+    // Single In-Flight Mutex: синхронная блокировка ДО первого асинхронного await
+    if (this.isOrderInFlight) {
+      console.warn('[Mutex Shield]: Попытка параллельной продажи заблокирована — ордер уже in-flight');
+      return;
+    }
+
     if (this._state !== 'IN_POSITION' || !this.activePosition || !this.connection || !this.keypair) {
       return;
     }
 
-    // Атомарный мьютекс выхода: переводим в 'CLOSING_POSITION'
+    // Атомарный мьютекс выхода: синхронный захват замка
+    this.isOrderInFlight = true;
     if (!this.transitionTo('CLOSING_POSITION', `Инициализация закрытия позиции: ${reason}`)) {
+      this.isOrderInFlight = false;
       return;
     }
 
@@ -1217,8 +1367,8 @@ export class LiveApkAdapter {
           tradeSizeSol: pos.solInvested,
           profitSol,
           profitPct,
-          feeSol: 0.00005,
-          jitoTipSol: JITO_TIP_SOL,
+          feeSol: this.currentMaxGasFeeSol,
+          jitoTipSol: this.currentJitoTipSol,
           bundleStatus: 'Landed',
           reasonRu: reason,
           holdTimeSec,
@@ -1256,6 +1406,8 @@ export class LiveApkAdapter {
       this.transitionTo('IN_POSITION', `Сбой закрытия: ${parsedErr.decodedReasonRu}. Повтор в след. тике`);
       await this.syncOnChainBalance();
     } finally {
+      // Гарантированное освобождение мьютекса выхода
+      this.isOrderInFlight = false;
       if ((this._state as BotState) === 'CLOSING_POSITION') {
         this.transitionTo('IN_POSITION', 'Сброс зависшего статуса CLOSING_POSITION');
       }

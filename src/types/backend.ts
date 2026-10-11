@@ -22,6 +22,17 @@ export type BotState =
   | 'COOLDOWN'
   | 'TERMINATED';
 
+/**
+ * Единый строго типизированный интерфейс настроек риска
+ */
+export interface RiskSettings {
+  tradeSizeSol: number;      // строго number: 0.01 | 0.02 | 0.05
+  dailyStopSol: number;      // строго number: 0.05 | 0.10 | 0.20
+  maxLossStreak: number;     // строго number: 2 | 3 | 5
+  gasProfile: 'ECONOMY' | 'BALANCED' | 'TURBO';
+  rpcUrl: string;
+}
+
 export type SyntheticFailureCode = 
   | 'DISCONNECT'
   | 'JITO_NOT_LANDED'

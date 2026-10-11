@@ -3,7 +3,7 @@ import { SimulatorBackendAdapter } from './simulatorAdapter';
 import { LiveApkAdapter, CandidateMetric } from './liveApkAdapter';
 import { RealSolanaSigningAdapter, createSigningAdapter } from '../signing/signingAdapter';
 import { createKeepAwakeAdapter } from '../keepAwakeAdapter';
-import { EngineStateV2, OperatingMode, ModeSwitchResult } from '../types/backend';
+import { EngineStateV2, OperatingMode, ModeSwitchResult, RiskSettings } from '../types/backend';
 import { SecureStorage } from '../secureStorage';
 
 export * from '../types/backend';
@@ -110,6 +110,47 @@ export class LiveApkBackendAdapter extends SimulatorBackendAdapter {
     return { success: false, amountSol: 0, errorRu: res.errorRu };
   }
 
+  public async setRiskLimits(limits: { maxTradeSol?: number; maxDailyLossSol?: number; maxConsecutiveLosses?: number }): Promise<void> {
+    const live = LiveApkAdapter.getInstance();
+    const patch: Partial<RiskSettings> = {};
+    if (limits.maxTradeSol !== undefined) patch.tradeSizeSol = limits.maxTradeSol;
+    if (limits.maxDailyLossSol !== undefined) patch.dailyStopSol = limits.maxDailyLossSol;
+    if (limits.maxConsecutiveLosses !== undefined) patch.maxLossStreak = limits.maxConsecutiveLosses;
+    live.setRiskSettings(patch);
+    SecureStorage.saveRiskSettings(patch);
+    if (this.state.microLive) {
+      if (limits.maxTradeSol !== undefined) this.state.microLive.maxTradeSol = limits.maxTradeSol;
+      if (limits.maxDailyLossSol !== undefined) this.state.microLive.maxDailyLossSol = limits.maxDailyLossSol;
+      if (limits.maxConsecutiveLosses !== undefined) this.state.microLive.maxConsecutiveLosses = limits.maxConsecutiveLosses;
+    }
+    this.notify();
+  }
+
+  public async setRiskSettings(settings: Partial<RiskSettings>): Promise<void> {
+    const live = LiveApkAdapter.getInstance();
+    live.setRiskSettings(settings);
+    SecureStorage.saveRiskSettings(settings);
+    if (this.state.microLive) {
+      if (settings.tradeSizeSol !== undefined) this.state.microLive.maxTradeSol = settings.tradeSizeSol;
+      if (settings.dailyStopSol !== undefined) this.state.microLive.maxDailyLossSol = settings.dailyStopSol;
+      if (settings.maxLossStreak !== undefined) this.state.microLive.maxConsecutiveLosses = settings.maxLossStreak;
+    }
+    if (settings.gasProfile) {
+      const urgency = settings.gasProfile === 'TURBO' ? 'TURBO' : settings.gasProfile === 'BALANCED' ? 'FAST' : 'ECONOMY';
+      this.state.gas = {
+        ...this.state.gas,
+        urgencyLevel: urgency,
+        maxFeeSol: live.maxGasFeeSol,
+        referenceFastTipSol: live.jitoTipSol,
+      };
+    }
+    this.notify();
+  }
+
+  public getRiskSettings(): RiskSettings {
+    return LiveApkAdapter.getInstance().riskSettings;
+  }
+
   public getState(): EngineStateV2 {
     const baseState = super.getState();
     const live = LiveApkAdapter.getInstance();
@@ -125,10 +166,26 @@ export class LiveApkBackendAdapter extends SimulatorBackendAdapter {
       stopLossPercent: -15,
     } : null;
 
+    const microLiveConfig = {
+      ...baseState.microLive,
+      maxTradeSol: live.tradeSizeSol,
+      maxDailyLossSol: live.dailyStopSol,
+      maxConsecutiveLosses: live.maxLossStreak,
+    };
+
+    const gasConfig = {
+      ...baseState.gas,
+      urgencyLevel: (live.gasProfile === 'TURBO' ? 'TURBO' : live.gasProfile === 'BALANCED' ? 'FAST' : 'ECONOMY') as 'ECONOMY' | 'FAST' | 'TURBO',
+      maxFeeSol: live.maxGasFeeSol,
+      referenceFastTipSol: live.jitoTipSol,
+    };
+
     return {
       ...baseState,
       botState: live.state,
       balanceSol: live.balanceSol,
+      microLive: microLiveConfig,
+      gas: gasConfig,
       rejectedByFilters: live.telemetry.rejectedCount,
       activePosition: activePos,
       decisions: live.decisions,
@@ -212,6 +269,19 @@ class EngineProxy implements EngineBackend {
     if (this.activeBackend.setRiskLimits) {
       await this.activeBackend.setRiskLimits(limits);
     }
+  }
+
+  public async setRiskSettings(settings: Partial<RiskSettings>): Promise<void> {
+    if (this.activeBackend.setRiskSettings) {
+      await this.activeBackend.setRiskSettings(settings);
+    }
+  }
+
+  public getRiskSettings(): RiskSettings {
+    if (this.activeBackend.getRiskSettings) {
+      return this.activeBackend.getRiskSettings();
+    }
+    return SecureStorage.getRiskSettings();
   }
 
   public getCustomRpcUrl(): string {

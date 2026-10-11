@@ -37,6 +37,7 @@ import {
   HandsOffAuditReport,
   VitalSignsInfo,
   TargetMetric,
+  RiskSettings,
 } from '../types/backend';
 import { SigningAdapter } from '../signing/signingAdapter';
 import { KeepAwakeAdapter } from '../keepAwakeAdapter';
@@ -60,6 +61,8 @@ export interface EngineBackend {
   getKeepAwakeAdapter(): KeepAwakeAdapter;
   syncRealAccount?(): Promise<void>;
   setRiskLimits?(limits: { maxTradeSol?: number; maxDailyLossSol?: number; maxConsecutiveLosses?: number }): Promise<void>;
+  setRiskSettings?(settings: Partial<RiskSettings>): Promise<void>;
+  getRiskSettings?(): RiskSettings;
   setCustomRpcUrl?(rpcUrl: string): Promise<boolean>;
   getCustomRpcUrl?(): string;
 
